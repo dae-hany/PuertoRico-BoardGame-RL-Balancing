@@ -67,6 +67,7 @@ class PuertoRicoGame:
         self._wharf_used = {i: False for i in range(num_players)}
         self._captain_passed_players = set()
         self._storage_assignments = {i: {'windrose': None, 'warehouses': []} for i in range(self.num_players)}
+        self._hacienda_used = False
         self._colonists_ship_underfilled = False # Evaluated at end of Mayor phase
         
         # For sequential tracking within a phase
@@ -317,6 +318,7 @@ class PuertoRicoGame:
                     self._next_player()
         else:
             self.players_taken_action += 1
+            self._hacienda_used = False
             if self.players_taken_action >= self.num_players:
                 # Phase is over
                 self._execute_phase_cleanup()
@@ -456,12 +458,32 @@ class PuertoRicoGame:
     # These functions take the player index and their chosen action parameters,
     # validate the action, apply state changes, and then call _advance_phase_turn()
 
-    def action_settler(self, player_idx: int, tile_choice: int, use_hacienda: bool = False):
+    def action_hacienda_draw(self, player_idx: int):
+        """
+        Allows a player with an occupied Hacienda to draw a face-down plantation tile.
+        This does not end their turn. They must still call action_settler afterwards.
+        """
+        if self.current_phase != Phase.SETTLER or self.current_player_idx != player_idx:
+            raise ValueError("Not this player's turn in Settler phase.")
+        p = self.players[player_idx]
+        if not p.is_building_occupied(BuildingType.HACIENDA):
+            raise ValueError("Player does not have an active Hacienda.")
+        if self._hacienda_used:
+            raise ValueError("Hacienda already used this turn.")
+        if p.empty_island_spaces <= 0:
+            raise ValueError("Player has no empty island spaces.")
+            
+        if self.plantation_stack:
+            drawn_tile = self.plantation_stack.pop()
+            p.place_plantation(drawn_tile)
+            # Note: Hospice does NOT apply to Hacienda-drawn tiles according to rules!
+        self._hacienda_used = True
+
+    def action_settler(self, player_idx: int, tile_choice: int):
         """
         tile_choice: index in self.face_up_plantations (0-len). 
         Set to -1 to take Quarry (if privilege or construction hut).
         Set to -2 to pass.
-        use_hacienda: boolean, if True and player has active Hacienda, draws from stack first.
         """
         if self.current_phase != Phase.SETTLER or self.current_player_idx != player_idx:
             raise ValueError("Not this player's turn in Settler phase.")
@@ -472,15 +494,8 @@ class PuertoRicoGame:
         if p.empty_island_spaces <= 0 and tile_choice != -2:
             raise ValueError("Player has filled all island spaces and must pass.")
             
-        if use_hacienda:
-            if p.is_building_occupied(BuildingType.HACIENDA):
-                if self.plantation_stack:
-                    drawn_tile = self.plantation_stack.pop()
-                    if p.empty_island_spaces > 0:
-                        p.place_plantation(drawn_tile)
-            else:
-                raise ValueError("Player does not have an active Hacienda.")
-                
+        placed_tile_idx = -1 # Keep track of where we place the chosen tile for Hospice
+        
         if tile_choice == -2: # Pass
             pass
         elif tile_choice == -1: # Quarry
@@ -490,19 +505,20 @@ class PuertoRicoGame:
             if self.quarry_stack > 0 and p.empty_island_spaces > 0:
                 p.place_plantation(TileType.QUARRY)
                 self.quarry_stack -= 1
+                placed_tile_idx = -1 # newly placed tile is always appended to the end
         else: # Face up plantation
             if 0 <= tile_choice < len(self.face_up_plantations):
                 tile = self.face_up_plantations.pop(tile_choice)
                 if p.empty_island_spaces > 0:
                     p.place_plantation(tile)
+                    placed_tile_idx = -1
             else:
                 raise ValueError("Invalid plantation choice.")
                 
-        # Hospice check
-        if tile_choice != -2 and p.is_building_occupied(BuildingType.HOSPICE):
-            # Place 1 colonist on the newly placed tile
+        # Hospice check ONLY applies to the officially drafted tile
+        if placed_tile_idx != -1 and p.is_building_occupied(BuildingType.HOSPICE):
             if self.colonists_supply > 0:
-                p.island_board[-1].is_occupied = True
+                p.island_board[placed_tile_idx].is_occupied = True
                 self.colonists_supply -= 1
                 
         self._advance_phase_turn()
@@ -690,12 +706,8 @@ class PuertoRicoGame:
             if can_load_anything:
                 break
                 
-        # Check Wharf
-        if not can_load_anything:
-            if p.is_building_occupied(BuildingType.WHARF) and not self._wharf_used.get(player_idx, False):
-                if any(p.goods[g] > 0 for g in Good):
-                    can_load_anything = True
-                    
+        # Wharf is 100% voluntary. We do NOT force can_load_anything to be True just because they have a Wharf.
+        
         if can_load_anything:
             raise ValueError("Rule Violation: Player MUST load if they have valid goods and ship capacity.")
             

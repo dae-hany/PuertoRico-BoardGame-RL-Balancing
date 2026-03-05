@@ -85,9 +85,9 @@ class PuertoRicoEnv(gym.Env):
             elif 8 <= action <= 14:
                 # Settler Phase (No Hacienda)
                 if action <= 13:
-                    self.game.action_settler(player_idx, tile_choice=action-8, use_hacienda=False)
+                    self.game.action_settler(player_idx, tile_choice=action-8)
                 else:
-                    self.game.action_settler(player_idx, tile_choice=-1, use_hacienda=False) # Quarry
+                    self.game.action_settler(player_idx, tile_choice=-1) # Quarry
                     
             elif action == 15:
                 # Pass
@@ -146,14 +146,11 @@ class PuertoRicoEnv(gym.Env):
                 
             elif 98 <= action <= 104:
                 # Settler Phase WITH Hacienda
-                if action <= 103:
-                    self.game.action_settler(player_idx, tile_choice=action-98, use_hacienda=True)
-                else:
-                    self.game.action_settler(player_idx, tile_choice=-1, use_hacienda=True) # Quarry
-                    
+                raise ValueError("Deprecated action combination. Agent should use action 105 to draw Hacienda first.")
+                
             elif action == 105:
-                # Settler Phase WITH Hacienda, then Pass
-                self.game.action_settler(player_idx, tile_choice=-2, use_hacienda=True)
+                # Hacienda Draw (face-down tile)
+                self.game.action_hacienda_draw(player_idx)
                             
         except ValueError as e:
             # Invalid action taken, though mask should prevent this.
@@ -302,22 +299,18 @@ class PuertoRicoEnv(gym.Env):
                 
         elif phase == Phase.SETTLER:
             mask[15] = True # Pass
-            can_hacienda = p.is_building_occupied(BuildingType.HACIENDA) and game.plantation_stack
+            can_hacienda = p.is_building_occupied(BuildingType.HACIENDA) and game.plantation_stack and getattr(game, '_hacienda_used', False) is False
             
             for i in range(len(game.face_up_plantations)):
                 if p.empty_island_spaces > 0:
                     mask[8 + i] = True
-                    if can_hacienda and p.empty_island_spaces > 1:
-                        mask[98 + i] = True
             
             can_quarry = (game.current_player_idx == game.active_role_player_idx()) or p.is_building_occupied(BuildingType.CONSTRUCTION_HUT)
             if can_quarry and game.quarry_stack > 0 and p.empty_island_spaces > 0:
                 mask[14] = True
-                if can_hacienda and p.empty_island_spaces > 1:
-                    mask[104] = True
                     
-            if can_hacienda:
-                mask[105] = True # Hacienda + Pass
+            if can_hacienda and p.empty_island_spaces > 0:
+                mask[105] = True # Standalone Hacienda Draw
                 
         elif phase == Phase.BUILDER:
             mask[15] = True # Pass
@@ -379,8 +372,8 @@ class PuertoRicoEnv(gym.Env):
                 for g in Good:
                     if p.goods[g] > 0:
                         mask[59 + g.value] = True
-                        can_load_anything = True
                         
+
             # Pass only allowed if cannot load anything
             if not can_load_anything:
                 mask[15] = True
