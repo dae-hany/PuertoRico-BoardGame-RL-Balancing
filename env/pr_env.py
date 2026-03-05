@@ -17,34 +17,36 @@ class PuertoRicoEnv(gym.Env):
         self.observation_space = self._define_observation_space()
 
     def _define_action_space(self) -> spaces.Discrete:
-        # Total flat discrete actions
-        # 0-7: Pick Role
-        # 8-14: Settler (0-5: Face up, 6: Quarry, 7: Hacienda)
-        # 15: Pass
-        # 16-38: Builder (23 buildings)
-        # 39-43: Trader (5 goods)
-        # 44-58: Captain Load (5 goods * 3 ships)
-        # 59-63: Captain Store Privilege (Which 1 Good to keep as free)
-        # 64-68: Captain Store WH (Small/Large warehouse selections could be complex)
-        # For RL, a Dict action space is often cleaner if using custom algorithms,
-        # but standard RL libs like stable-baselines3 prefer Discrete or MultiDiscrete.
-        # Given the combinatorial nature of Mayor phase, we might need a large Discrete space
-        # or MultiDiscrete. Let's use MultiDiscrete to pack different action types for now,
-        # or a large flat Discrete and map it.
-        # Let's start with a simpler flat representation for prototyping.
+        # === Action Mapping ===
+        # 0-7:     Pick Role (Role.SETTLER=0 ~ Role.PROSPECTOR_2=7)
+        # 8-13:    Settler - Face up plantation (index 0~5)
+        # 14:      Settler - Take Quarry
+        # 15:      Pass (phase-dependent: Settler/Builder/Trader/Captain/Mayor/Store/Craftsman)
+        # 16-38:   Builder - Build building (BuildingType 0~22)
+        # 39-43:   Trader - Sell good (Good 0~4)
+        # 44-58:   Captain - Load (ship_idx * 5 + good_type)
+        # 59-63:   Captain - Load via Wharf (Good 0~4)
+        # 64-68:   Captain Store - Keep Good (Good 0~4)
+        # 69-80:   Mayor - Toggle island slot (0~11)
+        # 81-92:   Mayor - Toggle city slot (0~11)
+        # 93-97:   Craftsman - Privilege good selection (Good 0~4)
+        # 98-103:  Settler WITH Hacienda - Face up plantation (index 0~5)
+        # 104:     Settler WITH Hacienda - Take Quarry
+        # 105:     Settler WITH Hacienda - Pass (Only take Hacienda tile)
+        # 106-199: (Reserved for future use)
         return spaces.Discrete(200)
 
     def _define_observation_space(self) -> spaces.Dict:
         obs_space = {
             "global_state": spaces.Dict({
-                "vp_chips": spaces.Discrete(123),
+                "vp_chips": spaces.Discrete(150),
                 "colonists_supply": spaces.Discrete(100),
-                "colonists_ship": spaces.Discrete(10),
-                "goods_supply": spaces.MultiDiscrete([10, 10, 11, 12, 12]), # Coffee, Tobacco, Corn, Sugar, Indigo
+                "colonists_ship": spaces.Discrete(30),
+                "goods_supply": spaces.MultiDiscrete([15, 15, 15, 15, 15]), # Coffee, Tobacco, Corn, Sugar, Indigo
                 "cargo_ships_good": spaces.MultiDiscrete([6, 6, 6]), # 0-4 for good, 5 for None
-                "cargo_ships_load": spaces.MultiDiscrete([10, 10, 10]),
+                "cargo_ships_load": spaces.MultiDiscrete([15, 15, 15]),
                 "trading_house": spaces.MultiDiscrete([6, 6, 6, 6]), # 0-4 for good, 5 for empty
-                "role_doubloons": spaces.MultiDiscrete([10] * 8), # Doubloons per role
+                "role_doubloons": spaces.MultiDiscrete([20] * 8), # Doubloons per role
                 "roles_available": spaces.MultiBinary(8), # 1 if available, 0 if taken
                 "face_up_plantations": spaces.MultiDiscrete([7] * 6), # 0-5 tile types, 6 for empty slot
                 "quarry_stack": spaces.Discrete(9),
@@ -53,9 +55,9 @@ class PuertoRicoEnv(gym.Env):
             }),
             "players": spaces.Tuple([
                 spaces.Dict({
-                    "doubloons": spaces.Discrete(50),
+                    "doubloons": spaces.Discrete(100),
                     "vp_chips": spaces.Discrete(100), # Assuming max 100 for safety
-                    "goods": spaces.MultiDiscrete([10, 10, 11, 12, 12]), # Inventory
+                    "goods": spaces.MultiDiscrete([15, 15, 15, 15, 15]), # Inventory
                     "island_tiles": spaces.MultiDiscrete([7] * 12),      # 0-5 plantations, 6 empty
                     "island_occupied": spaces.MultiBinary(12),
                     "city_buildings": spaces.MultiDiscrete([24] * 12),   # 0-22 buildings, 23 empty
@@ -81,72 +83,76 @@ class PuertoRicoEnv(gym.Env):
                 self.game.select_role(player_idx, Role(action))
                 
             elif 8 <= action <= 14:
-                # Settler Phase
+                # Settler Phase (No Hacienda)
                 if action <= 13:
-                    self.game.action_settler(player_idx, tile_choice=action-8)
+                    self.game.action_settler(player_idx, tile_choice=action-8, use_hacienda=False)
                 else:
-                    self.game.action_settler(player_idx, tile_choice=-1) # Quarry (action 14)
+                    self.game.action_settler(player_idx, tile_choice=-1, use_hacienda=False) # Quarry
                     
             elif action == 15:
-                # Use Hacienda
-                self.game.action_settler(player_idx, tile_choice=-2, use_hacienda=True)
-                
-            elif action == 16:
                 # Pass
                 self._handle_pass(player_idx)
                 
-            elif 17 <= action <= 39:
+            elif 16 <= action <= 38:
                 # Builder Phase (23 buildings)
-                b_type = BuildingType(action - 17)
+                b_type = BuildingType(action - 16)
                 self.game.action_builder(player_idx, building_choice=b_type)
                 
-            elif 40 <= action <= 44:
+            elif 39 <= action <= 43:
                 # Trader Phase
-                g_type = Good(action - 40)
+                g_type = Good(action - 39)
                 self.game.action_trader(player_idx, sell_good=g_type)
                 
-            elif action == 45:
-                # Craftsman Privilege (Choose extra good)
-                # For RL simplicity, we'll auto-resolve Craftsman if no privilege.
-                # If privilege, they use 40-44 mapping? Let's give specific actions.
-                # Actually, in Craftsman, the engine handles it silently. We just need to give them a choice
-                pass # Revisit if we add craftsman choice actions
-                
-            elif 46 <= action <= 60:
+            elif 44 <= action <= 58:
                 # Captain Load (5 goods * 3 ships)
-                idx = action - 46
+                idx = action - 44
                 ship_idx = idx // 5
                 g_type = Good(idx % 5)
                 self.game.action_captain_load(player_idx, ship_idx, g_type)
                 
-            elif 61 <= action <= 65:
+            elif 59 <= action <= 63:
                 # Captain Load Wharf
-                g_type = Good(action - 61)
+                g_type = Good(action - 59)
                 self.game.action_captain_load(player_idx, -1, g_type)
                 
-            elif 66 <= action <= 80:
-                # Captain Store (simplified: keep 1 distinct good)
-                g_type = Good(action - 66)
-                self.game.action_captain_store(player_idx, {g_type: 1})
-                # Note: Full warehouse combinations are complex. We will simplify for the baseline RL agent
-                # to just picking 1 good to store, or passing (action 16) to store nothing.
+            elif 64 <= action <= 68:
+                # Captain Store
+                g_type = Good(action - 64)
+                # Store all of this good if we have a warehouse, else 1
+                store_amt = 1
+                if p.is_building_occupied(BuildingType.SMALL_WAREHOUSE) or p.is_building_occupied(BuildingType.LARGE_WAREHOUSE):
+                    store_amt = p.goods[g_type]
+                self.game.action_captain_store(player_idx, {g_type: store_amt})
                 
-            elif 81 <= action <= 104:
+            elif 69 <= action <= 92:
                 # Mayor Toggle
-                # 81-92: Toggle Island (12 slots)
-                # 93-104: Toggle City (12 slots)
-                if action <= 92:
-                    idx = action - 81
+                if action <= 80:
+                    idx = action - 69
                     if idx < len(p.island_board):
                         p.island_board[idx].is_occupied = not p.island_board[idx].is_occupied
                 else:
-                    idx = action - 93
+                    idx = action - 81
                     if idx < len(p.city_board):
-                        # toggle 0 -> 1 -> max -> 0
                         b = p.city_board[idx]
                         max_cap = BUILDING_DATA[b.building_type][2]
                         if max_cap > 0:
                             b.colonists = (b.colonists + 1) % (max_cap + 1)
+                            
+            elif 93 <= action <= 97:
+                # Craftsman Privilege
+                g_type = Good(action - 93)
+                self.game.action_craftsman(player_idx, privilege_good=g_type)
+                
+            elif 98 <= action <= 104:
+                # Settler Phase WITH Hacienda
+                if action <= 103:
+                    self.game.action_settler(player_idx, tile_choice=action-98, use_hacienda=True)
+                else:
+                    self.game.action_settler(player_idx, tile_choice=-1, use_hacienda=True) # Quarry
+                    
+            elif action == 105:
+                # Settler Phase WITH Hacienda, then Pass
+                self.game.action_settler(player_idx, tile_choice=-2, use_hacienda=True)
                             
         except ValueError as e:
             # Invalid action taken, though mask should prevent this.
@@ -175,6 +181,8 @@ class PuertoRicoEnv(gym.Env):
             island_assgn = [t.is_occupied for t in p.island_board]
             city_assgn = [b.colonists for b in p.city_board]
             self.game.action_mayor_pass(player_idx, island_assgn, city_assgn)
+        elif self.game.current_phase == Phase.CRAFTSMAN:
+            self.game.action_craftsman(player_idx, privilege_good=None)
         else:
             raise ValueError(f"Cannot pass in phase {self.game.current_phase.name if self.game.current_phase else 'INIT'}")
 
@@ -264,7 +272,10 @@ class PuertoRicoEnv(gym.Env):
         }
 
     def _get_info(self):
-        return {"current_phase": self.game.current_phase.name if self.game.current_phase else "INIT"}
+        info = {"current_phase": self.game.current_phase.name if self.game.current_phase else "INIT"}
+        if self.game.check_game_end():
+            info["final_scores"] = self.game.get_scores()
+        return info
 
     def _calculate_reward(self):
         """
@@ -288,35 +299,45 @@ class PuertoRicoEnv(gym.Env):
                 mask[r.value] = True
                 
         elif phase == Phase.SETTLER:
-            mask[16] = True # Pass
+            mask[15] = True # Pass
+            can_hacienda = p.is_building_occupied(BuildingType.HACIENDA) and game.plantation_stack
+            
             for i in range(len(game.face_up_plantations)):
                 if p.empty_island_spaces > 0:
                     mask[8 + i] = True
+                    if can_hacienda:
+                        mask[98 + i] = True
             
             can_quarry = (game.current_player_idx == game.active_role_player_idx()) or p.is_building_occupied(BuildingType.CONSTRUCTION_HUT)
             if can_quarry and game.quarry_stack > 0 and p.empty_island_spaces > 0:
                 mask[14] = True
-                
-            if p.is_building_occupied(BuildingType.HACIENDA) and game.plantation_stack:
-                mask[15] = True
+                if can_hacienda:
+                    mask[104] = True
+                    
+            if can_hacienda:
+                mask[105] = True # Hacienda + Pass
                 
         elif phase == Phase.BUILDER:
-            mask[16] = True # Pass
+            mask[15] = True # Pass
+            has_privilege = (game.current_player_idx == game.active_role_player_idx())
+            active_quarries = sum(1 for t in p.island_board if t.tile_type == TileType.QUARRY and t.is_occupied)
+            max_discount = active_quarries
+            if has_privilege:
+                max_discount += 1
+                
             for b_type, count in game.building_supply.items():
                 if count > 0 and not p.has_building(b_type):
-                    # Rough cost check (ignoring quarry discounts for pure mask, allowing engine to reject if really too poor,
-                    # but let's do safe base mask)
-                    if p.doubloons + 4 >= BUILDING_DATA[b_type][0]: # At least structurally possible
-                        mask[17 + b_type.value] = True
+                    if p.doubloons + max_discount >= BUILDING_DATA[b_type][0]: 
+                        mask[16 + b_type.value] = True
                         
         elif phase == Phase.TRADER:
-            mask[16] = True # Pass
+            mask[15] = True # Pass
             if len(game.trading_house) < 4:
                 has_office = p.is_building_occupied(BuildingType.OFFICE)
                 for g in Good:
                     if p.goods[g] > 0:
                         if g not in game.trading_house or has_office:
-                            mask[40 + g.value] = True
+                            mask[39 + g.value] = True
                             
         elif phase == Phase.CAPTAIN:
             # Need to find valid ship/good combos
@@ -336,42 +357,48 @@ class PuertoRicoEnv(gym.Env):
                                 allowed = True
                                 
                             if allowed:
-                                mask[46 + (ship_idx * 5) + g.value] = True
+                                mask[44 + (ship_idx * 5) + g.value] = True
                                 can_load_anything = True
                                 
             # Wharf
             if p.is_building_occupied(BuildingType.WHARF) and not game._wharf_used.get(game.current_player_idx, False):
                 for g in Good:
                     if p.goods[g] > 0:
-                        mask[61 + g.value] = True
+                        mask[59 + g.value] = True
                         can_load_anything = True
                         
             # Pass only allowed if cannot load anything
             if not can_load_anything:
-                mask[16] = True
+                mask[15] = True
                 
         elif phase == Phase.CAPTAIN_STORE:
-            mask[16] = True # Can always store nothing
+            mask[15] = True # Can always store nothing
             for g in Good:
                 if p.goods[g] >= 1:
-                    mask[66 + g.value] = True
+                    mask[64 + g.value] = True
                     
         elif phase == Phase.MAYOR:
             # Toggle actions
-            mask[16] = True # Pass (Submit)
+            mask[15] = True # Pass (Submit)
             for i in range(len(p.island_board)):
                 if p.island_board[i].tile_type != TileType.EMPTY:
-                    mask[81 + i] = True
+                    mask[69 + i] = True
             for i in range(len(p.city_board)):
                 if p.city_board[i].building_type != BuildingType.EMPTY:
-                    mask[93 + i] = True
+                    mask[81 + i] = True
 
         elif phase == Phase.CRAFTSMAN:
-            # Since auto-producing, the only action is to pass (or pick privilege good if implemented)
-            # For now just let them pass.
-            mask[16] = True
+            has_privilege = (game.current_player_idx == game.active_role_player_idx())
+            mask[15] = True # Can always pass 
+            if has_privilege:
+                # Need to find what goods were actually produced to be strictly accurate,
+                # but to avoid duplicating engine logic, we just allow selecting any good they have
+                # or any good in supply. Engine will ignore invalid privilege goods.
+                for g in Good:
+                    if game.goods_supply[g] > 0:
+                        mask[93 + g.value] = True
             
         elif phase == Phase.PROSPECTOR:
-            mask[16] = True
+            mask[15] = True
 
         return mask
