@@ -33,7 +33,8 @@ class PuertoRicoEnv(gym.Env):
         # 98-103:  Settler WITH Hacienda - Face up plantation (index 0~5)
         # 104:     Settler WITH Hacienda - Take Quarry
         # 105:     Settler WITH Hacienda - Pass (Only take Hacienda tile)
-        # 106-199: (Reserved for future use)
+        # 106-110: Captain Store Warehouse (Good 0~4)
+        # 111-199: (Reserved for future use)
         return spaces.Discrete(200)
 
     def _define_observation_space(self) -> spaces.Dict:
