@@ -662,6 +662,26 @@ class PuertoRicoGame:
                     raise ValueError("Another ship is already loading this kind of good.")
                     
             loaded_amount = min(amount, ship.capacity - ship.current_load)
+            
+            # --- Rule Verification: Must choose a ship that holds the most goods ---
+            max_loadable = 0
+            for i, test_ship in enumerate(self.cargo_ships):
+                if not test_ship.is_full:
+                    allowed = False
+                    if test_ship.good_type is None:
+                        other_has_it = any(os.good_type == good_type for j, os in enumerate(self.cargo_ships) if j != i)
+                        if not other_has_it:
+                            allowed = True
+                    elif test_ship.good_type == good_type:
+                        allowed = True
+                    
+                    if allowed:
+                        potential = min(amount, test_ship.capacity - test_ship.current_load)
+                        max_loadable = max(max_loadable, potential)
+                        
+            if loaded_amount < max_loadable:
+                raise ValueError(f"Rule Violation: Must load on a ship that maximizes the stored amount. (Can load {max_loadable}, tried to load {loaded_amount})")
+            
             ship.current_load += loaded_amount
             ship.good_type = good_type
             

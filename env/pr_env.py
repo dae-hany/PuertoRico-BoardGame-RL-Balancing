@@ -322,7 +322,7 @@ class PuertoRicoEnv(gym.Env):
             max_opp_total = max(totals[j] for j in range(self.num_players) if j != i)
             
             # 1. Win/Loss (Zero-sum fundamental)
-            is_winner = my_total > max_opp_total
+            is_winner = my_total >= max_opp_total
             win_reward = 1.0 if is_winner else -1.0
             
             # 2. Score Margin Shaping
