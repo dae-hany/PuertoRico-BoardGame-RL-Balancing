@@ -26,12 +26,12 @@ class PuertoRicoEnv(gym.Env):
         # 39-43:   Trader - Sell good (Good 0~4)
         # 44-58:   Captain - Load (ship_idx * 5 + good_type)
         # 59-63:   Captain - Load via Wharf (Good 0~4)
-        # 64-68:   Captain Store - Keep Good (Good 0~4)
+        # 64-68:   Captain Store Windrose - Keep Good (Good 0~4)
         # 69-80:   Mayor - Toggle island slot (0~11)
         # 81-92:   Mayor - Toggle city slot (0~11)
         # 93-97:   Craftsman - Privilege good selection (Good 0~4)
-        # 98-103:  Settler WITH Hacienda - Face up plantation (index 0~5)
-        # 104:     Settler WITH Hacienda - Take Quarry
+        # 98-103:  (Deprecated) Settler WITH Hacienda - Face up plantation (index 0~5)
+        # 104:     (Deprecated) Settler WITH Hacienda - Take Quarry
         # 105:     Settler WITH Hacienda - Pass (Only take Hacienda tile)
         # 106-110: Captain Store Warehouse (Good 0~4)
         # 111-199: (Reserved for future use)
@@ -40,7 +40,7 @@ class PuertoRicoEnv(gym.Env):
     def _define_observation_space(self) -> spaces.Dict:
         obs_space = {
             "global_state": spaces.Dict({
-                "vp_chips": spaces.Discrete(150),
+                "vp_chips": spaces.Box(low=-50, high=200, shape=(), dtype=np.int64),
                 "colonists_supply": spaces.Discrete(100),
                 "colonists_ship": spaces.Discrete(30),
                 "goods_supply": spaces.MultiDiscrete([15, 15, 15, 15, 15]), # Coffee, Tobacco, Corn, Sugar, Indigo
@@ -58,7 +58,7 @@ class PuertoRicoEnv(gym.Env):
             "players": spaces.Tuple([
                 spaces.Dict({
                     "doubloons": spaces.Discrete(100),
-                    "vp_chips": spaces.Discrete(100), # Assuming max 100 for safety
+                    "vp_chips": spaces.Box(low=0, high=200, shape=(), dtype=np.int64),
                     "goods": spaces.MultiDiscrete([15, 15, 15, 15, 15]), # Inventory
                     "island_tiles": spaces.MultiDiscrete([7] * 12),      # 0-5 plantations, 6 empty
                     "island_occupied": spaces.MultiBinary(12),
@@ -132,14 +132,31 @@ class PuertoRicoEnv(gym.Env):
                 if action <= 80:
                     idx = action - 69
                     if idx < len(p.island_board):
-                        p.island_board[idx].is_occupied = not p.island_board[idx].is_occupied
+                        tile = p.island_board[idx]
+                        if tile.tile_type != TileType.EMPTY:
+                            if not tile.is_occupied and p.unplaced_colonists > 0:
+                                tile.is_occupied = True
+                                p.unplaced_colonists -= 1
+                            elif tile.is_occupied:
+                                tile.is_occupied = False
+                                p.unplaced_colonists += 1
                 else:
                     idx = action - 81
                     if idx < len(p.city_board):
                         b = p.city_board[idx]
-                        max_cap = BUILDING_DATA[b.building_type][2]
-                        if max_cap > 0:
-                            b.colonists = (b.colonists + 1) % (max_cap + 1)
+                        if b.building_type != BuildingType.EMPTY and b.building_type != BuildingType.OCCUPIED_SPACE:
+                            max_cap = BUILDING_DATA[b.building_type][2]
+                            if max_cap > 0:
+                                old_c = b.colonists
+                                new_c = (old_c + 1) % (max_cap + 1)
+                                diff = new_c - old_c
+                                if diff > 0: # Adding a colonist
+                                    if p.unplaced_colonists >= diff:
+                                        b.colonists = new_c
+                                        p.unplaced_colonists -= diff
+                                else: # Wrapped around, removing colonists
+                                    b.colonists = new_c
+                                    p.unplaced_colonists += (-diff)
                             
             elif 93 <= action <= 97:
                 # Craftsman Privilege
@@ -225,7 +242,7 @@ class PuertoRicoEnv(gym.Env):
         face_up_plantations += [6] * (max_face_up - len(face_up_plantations))
         
         global_state = {
-            "vp_chips": game.vp_chips,
+            "vp_chips": np.array(game.vp_chips, dtype=np.int64),
             "colonists_supply": game.colonists_supply,
             "colonists_ship": game.colonists_ship,
             "goods_supply": np.array([game.goods_supply[Good(i)] for i in range(5)], dtype=np.int64),
@@ -264,7 +281,7 @@ class PuertoRicoEnv(gym.Env):
             
             player_dict = {
                 "doubloons": p.doubloons,
-                "vp_chips": p.vp_chips,
+                "vp_chips": np.array(p.vp_chips, dtype=np.int64),
                 "goods": np.array([p.goods[Good(g)] for g in range(5)], dtype=np.int64),
                 "island_tiles": np.array(island_tiles, dtype=np.int64),
                 "island_occupied": np.array(island_occ, dtype=np.int8),
