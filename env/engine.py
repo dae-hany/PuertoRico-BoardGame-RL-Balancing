@@ -448,10 +448,6 @@ class PuertoRicoGame:
             
         self._advance_phase_turn()
 
-    # --- Phase Action Handlers --- 
-    # These functions take the player index and their chosen action parameters,
-    # validate the action, apply state changes, and then call _advance_phase_turn()
-
     def action_hacienda_draw(self, player_idx: int):
         """
         Allows a player with an occupied Hacienda to draw a face-down plantation tile.
@@ -496,7 +492,9 @@ class PuertoRicoGame:
             can_quarry = has_privilege or p.is_building_occupied(BuildingType.CONSTRUCTION_HUT)
             if not can_quarry:
                 raise ValueError("Cannot take quarry without privilege or construction hut.")
-            if self.quarry_stack > 0 and p.empty_island_spaces > 0:
+            if self.quarry_stack <= 0:
+                raise ValueError("No more quarries available.")
+            if p.empty_island_spaces > 0:
                 p.place_plantation(TileType.QUARRY)
                 self.quarry_stack -= 1
                 tile_placed = True
