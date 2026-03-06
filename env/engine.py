@@ -243,7 +243,7 @@ class PuertoRicoGame:
                         
                     elif b_type == BuildingType.CITY_HALL:
                         # 1 VP per violet building
-                        violet_count = sum(1 for v_b in p.city_board if BUILDING_DATA[v_b.building_type][5] is None)
+                        violet_count = sum(1 for v_b in p.city_board if v_b.building_type != BuildingType.OCCUPIED_SPACE and BUILDING_DATA[v_b.building_type][5] is None)
                         score += violet_count
                         
             tie_breaker = p.doubloons + sum(p.goods.values())
@@ -545,8 +545,12 @@ class PuertoRicoGame:
         empty_city = 0
         for i, val in enumerate(city_assignment):
             b_type = p.city_board[i].building_type
-            max_cap = BUILDING_DATA[b_type][2]
-            empty_city += (max_cap - val)
+            if b_type != BuildingType.OCCUPIED_SPACE:
+                max_cap = BUILDING_DATA[b_type][2]
+                empty_city += (max_cap - val)
+            else:
+                if val > 0:
+                    raise ValueError("Cannot place colonists on an occupied space dummy.")
             
         leftover_colonists = p.total_colonists_owned - total_placed
         if leftover_colonists > 0 and (empty_island > 0 or empty_city > 0):
@@ -557,8 +561,11 @@ class PuertoRicoGame:
             
         for i, val in enumerate(city_assignment):
             b_type = p.city_board[i].building_type
-            max_cap = BUILDING_DATA[b_type][2]
-            p.city_board[i].colonists = val
+            if b_type != BuildingType.OCCUPIED_SPACE:
+                max_cap = BUILDING_DATA[b_type][2]
+                p.city_board[i].colonists = val
+            else:
+                p.city_board[i].colonists = 0
             
         # Any remaining are returned to unplaced (San Juan)
         p.unplaced_colonists = leftover_colonists

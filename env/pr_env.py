@@ -51,6 +51,7 @@ class PuertoRicoEnv(gym.Env):
                 "roles_available": spaces.MultiBinary(8), # 1 if available, 0 if taken
                 "face_up_plantations": spaces.MultiDiscrete([7] * (self.num_players + 1)), # 0-5 tile types, 6 for empty slot
                 "quarry_stack": spaces.Discrete(9),
+                "governor_idx": spaces.Discrete(self.num_players),
                 "current_player": spaces.Discrete(self.num_players),
                 "current_phase": spaces.Discrete(10)
             }),
@@ -61,7 +62,7 @@ class PuertoRicoEnv(gym.Env):
                     "goods": spaces.MultiDiscrete([15, 15, 15, 15, 15]), # Inventory
                     "island_tiles": spaces.MultiDiscrete([7] * 12),      # 0-5 plantations, 6 empty
                     "island_occupied": spaces.MultiBinary(12),
-                    "city_buildings": spaces.MultiDiscrete([24] * 12),   # 0-22 buildings, 23 empty
+                    "city_buildings": spaces.MultiDiscrete([25] * 12),   # 0-23 buildings, 24 empty
                     "city_colonists": spaces.MultiDiscrete([4] * 12),    # Up to 3 per building, 0-3 range (size 4)
                     "unplaced_colonists": spaces.Discrete(20)
                 }) for _ in range(self.num_players)
@@ -229,6 +230,7 @@ class PuertoRicoEnv(gym.Env):
             "roles_available": np.array(roles_available, dtype=np.int8),
             "face_up_plantations": np.array(face_up_plantations, dtype=np.int64),
             "quarry_stack": game.quarry_stack,
+            "governor_idx": game.governor_idx,
             "current_player": game.current_player_idx,
             "current_phase": game.current_phase if game.current_phase is not None else 9
         }
@@ -251,7 +253,7 @@ class PuertoRicoEnv(gym.Env):
             for b in p.city_board:
                 city_buildings.append(b.building_type)
                 city_col.append(b.colonists)
-            city_buildings += [23] * (12 - len(city_buildings))
+            city_buildings += [24] * (12 - len(city_buildings))
             city_col += [0] * (12 - len(city_col))
             
             player_dict = {

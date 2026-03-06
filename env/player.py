@@ -30,9 +30,7 @@ class Player:
 
     @property
     def empty_city_spaces(self) -> int:
-        # Note: Large buildings take 2 spaces, handled during placement
-        occupied_spaces = sum(2 if self._is_large_building(b.building_type) else 1 for b in self.city_board)
-        return 12 - occupied_spaces
+        return 12 - len(self.city_board)
 
     def _is_large_building(self, b_type: BuildingType) -> bool:
         from configs.constants import BUILDING_DATA
@@ -67,6 +65,8 @@ class Player:
         if self.empty_city_spaces < spaces_needed:
             raise ValueError("Not enough empty city spaces")
         self.city_board.append(CityBuilding(building_type=building_type, colonists=0))
+        if spaces_needed == 2:
+            self.city_board.append(CityBuilding(building_type=BuildingType.OCCUPIED_SPACE, colonists=0))
 
     def has_building(self, building_type: BuildingType) -> bool:
         return any(b.building_type == building_type for b in self.city_board)

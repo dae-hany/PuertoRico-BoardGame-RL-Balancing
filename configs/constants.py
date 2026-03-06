@@ -72,6 +72,7 @@ class BuildingType(IntEnum):
     CITY_HALL = 22
     
     EMPTY = 23
+    OCCUPIED_SPACE = 24
 
 # Default counts for plantations
 PLANTATION_COUNTS = {
@@ -120,7 +121,8 @@ BUILDING_DATA = {
     BuildingType.RESIDENCE: (10, 4, 1, 1, True, None),
     BuildingType.FORTRESS: (10, 4, 1, 1, True, None),
     BuildingType.CUSTOMS_HOUSE: (10, 4, 1, 1, True, None),
-    BuildingType.CITY_HALL: (10, 4, 1, 1, True, None)
+    BuildingType.CITY_HALL: (10, 4, 1, 1, True, None),
+    BuildingType.OCCUPIED_SPACE: (0, 0, 0, 0, False, None)
 }
 
 # Selling prices for goods at trading house
