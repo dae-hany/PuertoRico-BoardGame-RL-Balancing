@@ -12,8 +12,8 @@ from env.player import Player
 
 class PuertoRicoGame:
     def __init__(self, num_players: int):
-        if num_players not in [3, 4, 5]:
-            raise ValueError("Puerto Rico only supports 3, 4, or 5 players.")
+        if num_players not in [2, 3, 4, 5]:
+            raise ValueError("Puerto Rico only supports 2, 3, 4, or 5 players.")
         
         self.num_players = num_players
         self.players: List[Player] = [Player(i) for i in range(num_players)]
@@ -25,11 +25,11 @@ class PuertoRicoGame:
         
         # Track goods available in supply
         self.goods_supply = {
-            Good.COFFEE: 9,
-            Good.TOBACCO: 9,
-            Good.CORN: 10,
-            Good.SUGAR: 11,
-            Good.INDIGO: 11
+            Good.COFFEE: 9 if num_players > 2 else 7,
+            Good.TOBACCO: 9 if num_players > 2 else 7,
+            Good.CORN: 10 if num_players > 2 else 8,
+            Good.SUGAR: 11 if num_players > 2 else 9,
+            Good.INDIGO: 11 if num_players > 2 else 9
         }
         
         # Cargo ships setup
@@ -41,14 +41,20 @@ class PuertoRicoGame:
         self.trading_house: List[Good] = []
         
         # Tile supplies
-        self.quarry_stack = QUARRY_COUNT
+        self.quarry_stack = QUARRY_COUNT if num_players > 2 else QUARRY_COUNT - 3
         self.plantation_stack: List[TileType] = self._init_plantation_stack()
         self.face_up_plantations: List[TileType] = []
         
         # Building supplies
-        self.building_supply: Dict[BuildingType, int] = {
-            b_type: data[3] for b_type, data in BUILDING_DATA.items()
-        }
+        self.building_supply: Dict[BuildingType, int] = {}
+        for b_type, data in BUILDING_DATA.items():
+            if b_type in (BuildingType.OCCUPIED_SPACE, BuildingType.EMPTY):
+                self.building_supply[b_type] = 0
+            elif num_players == 2:
+                is_production = data[5] is not None
+                self.building_supply[b_type] = 2 if is_production else 1
+            else:
+                self.building_supply[b_type] = data[3]
         
         # Roles and Doubloons
         self.available_roles: List[Role] = self._init_roles()
@@ -82,6 +88,8 @@ class PuertoRicoGame:
     def _init_plantation_stack(self) -> List[TileType]:
         stack = []
         for t_type, count in PLANTATION_COUNTS.items():
+            if self.num_players == 2:
+                count -= 3
             stack.extend([t_type] * count)
         random.shuffle(stack)
         return stack
@@ -91,7 +99,7 @@ class PuertoRicoGame:
             Role.SETTLER, Role.MAYOR, Role.BUILDER, 
             Role.CRAFTSMAN, Role.TRADER, Role.CAPTAIN
         ]
-        if self.num_players >= 4:
+        if self.num_players == 2 or self.num_players >= 4:
             roles.append(Role.PROSPECTOR_1)
         if self.num_players >= 5:
             roles.append(Role.PROSPECTOR_2)
@@ -104,11 +112,12 @@ class PuertoRicoGame:
             p.add_doubloons(start_money)
             
         # Deal initial plantations
+        # 2 players: governor=Indigo, 2nd=Corn
         # 3 players: governor=Indigo, 2nd=Indigo, 3rd=Corn
         # 4 players: gov=Indigo, 2nd=Indigo, 3rd=Corn, 4th=Corn
         # 5 players: gov=Indigo, 2nd=Indigo, 3rd=Indigo, 4th=Corn, 5th=Corn
         
-        num_indigo = 2 if self.num_players < 5 else 3
+        num_indigo = 1 if self.num_players == 2 else (2 if self.num_players < 5 else 3)
         
         for i in range(self.num_players):
             actual_idx = (self.governor_idx + i) % self.num_players
@@ -153,7 +162,10 @@ class PuertoRicoGame:
         self.active_role = None
         
         # Roles are chosen in clockwise order starting from governor
-        if len(self.roles_in_play) < self.num_players:
+        # In a 2-player game, 6 roles are chosen alternatingly per round.
+        target_roles = 6 if self.num_players == 2 else self.num_players
+        
+        if len(self.roles_in_play) < target_roles:
             first_chooser = self.governor_idx
             next_chooser_offset = len(self.roles_in_play)
             next_player = (first_chooser + next_chooser_offset) % self.num_players

@@ -86,12 +86,13 @@ PLANTATION_COUNTS = {
 QUARRY_COUNT = 8
 
 # Setup counts based on number of players
-VP_CHIPS_SETUP = {3: 75, 4: 100, 5: 122}
-COLONIST_SHIP_SETUP = {3: 3, 4: 4, 5: 5}
-COLONIST_SUPPLY_SETUP = {3: 55, 4: 75, 5: 95}
-STARTING_DOUBLOONS = {3: 2, 4: 3, 5: 4}
+VP_CHIPS_SETUP = {2: 65, 3: 75, 4: 100, 5: 122}
+COLONIST_SHIP_SETUP = {2: 2, 3: 3, 4: 4, 5: 5}
+COLONIST_SUPPLY_SETUP = {2: 40, 3: 55, 4: 75, 5: 95}
+STARTING_DOUBLOONS = {2: 3, 3: 2, 4: 3, 5: 4}
 
 CARGO_SHIPS_SETUP = {
+    2: [4, 6],
     3: [4, 5, 6],
     4: [5, 6, 7],
     5: [6, 7, 8]

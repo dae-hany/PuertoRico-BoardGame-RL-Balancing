@@ -63,5 +63,90 @@ class TestPuertoRicoGame(unittest.TestCase):
         self.assertEqual(self.game.current_phase, Phase.END_ROUND)
         self.assertEqual(self.game.current_player_idx, next_player)
 
+class TestPuertoRicoGame2Player(unittest.TestCase):
+
+    def setUp(self):
+        self.game = PuertoRicoGame(num_players=2)
+
+    def test_2player_setup(self):
+        self.assertEqual(len(self.game.players), 2)
+        self.assertEqual(self.game.vp_chips, 65)
+        self.assertEqual(self.game.colonists_supply, 40)
+        self.assertEqual(self.game.colonists_ship, 2)
+        
+        # Check initial doubloons
+        for p in self.game.players:
+            self.assertEqual(p.doubloons, 3)
+            
+        # Check plantations
+        gov_idx = self.game.governor_idx
+        self.assertEqual(self.game.players[gov_idx].island_board[0].tile_type, TileType.INDIGO_PLANTATION)
+        self.assertEqual(self.game.players[(gov_idx + 1) % 2].island_board[0].tile_type, TileType.CORN_PLANTATION)
+
+        # Check buildings supply
+        self.assertEqual(self.game.building_supply[BuildingType.SMALL_INDIGO_PLANT], 2)
+        self.assertEqual(self.game.building_supply[BuildingType.INDIGO_PLANT], 2)
+        self.assertEqual(self.game.building_supply[BuildingType.SMALL_MARKET], 1)
+        self.assertEqual(self.game.building_supply[BuildingType.GUILDHALL], 1)
+
+    def test_2player_role_selection_rotation(self):
+        self.game.start_game()
+        
+        roles_to_pick = [
+            Role.SETTLER, Role.MAYOR, Role.BUILDER,
+            Role.CRAFTSMAN, Role.TRADER, Role.CAPTAIN
+        ]
+        
+        gov_idx = self.game.governor_idx
+        other_idx = (gov_idx + 1) % 2
+        
+        # In a 2 player game, picking goes: Gov, Other, Gov, Other, Gov, Other (total 6 roles)
+        
+        for i, role in enumerate(roles_to_pick):
+            expected_player = gov_idx if i % 2 == 0 else other_idx
+            self.assertEqual(self.game.current_player_idx, expected_player)
+            
+            # This player picks a role
+            self.game.select_role(expected_player, role)
+            
+            # They do whatever (just pass to end phase)
+            if role == Role.SETTLER:
+                self.game.action_settler(expected_player, tile_choice=-2)
+                self.game.action_settler((expected_player + 1) % 2, tile_choice=-2)
+            elif role == Role.MAYOR:
+                for target_p_idx in [expected_player, (expected_player + 1) % 2]:
+                    p = self.game.players[target_p_idx]
+                    cols = p.total_colonists_owned
+                    isl = [True] * min(cols, len(p.island_board)) + [False] * max(0, len(p.island_board) - cols)
+                    self.game.action_mayor_pass(target_p_idx, isl, [0]*len(p.city_board))
+            elif role == Role.BUILDER:
+                self.game.action_builder(expected_player, building_choice=None)
+                self.game.action_builder((expected_player + 1) % 2, building_choice=None)
+            elif role == Role.CRAFTSMAN:
+                if self.game.current_phase == Phase.CRAFTSMAN:
+                    self.game.action_craftsman(expected_player, privilege_good=None)
+            elif role == Role.TRADER:
+                self.game.action_trader(expected_player, sell_good=None)
+                self.game.action_trader((expected_player + 1) % 2, sell_good=None)
+            elif role == Role.CAPTAIN:
+                for target_p in self.game.players:
+                    for g in Good:
+                        target_p.goods[g] = 0
+                self.game.action_captain_pass(expected_player)
+                self.game.action_captain_pass((expected_player + 1) % 2)
+                
+                # Captain phase ALWAYS advances to Captain Store phase
+                if self.game.current_phase == Phase.CAPTAIN_STORE:
+                    self.game.action_captain_store_pass(expected_player)
+                    self.game.action_captain_store_pass((expected_player + 1) % 2)
+                
+            if i < 5:
+                # Still END_ROUND (waiting for next role pick)
+                self.assertEqual(self.game.current_phase, Phase.END_ROUND)
+            else:
+                # After 6th role, round ends, governor passes
+                self.assertEqual(self.game.current_phase, Phase.END_ROUND)
+                self.assertEqual(self.game.governor_idx, other_idx)
+
 if __name__ == '__main__':
     unittest.main()
