@@ -9,7 +9,7 @@ puerto-rico-2players-rule.pdf
 puerto-rico-rules-en.pdf
 rules.txt
 
-# Ignore . files 
+# Ignore folders starts with '.'
 __pycache__
 .agents/
 .pytest_cache/
