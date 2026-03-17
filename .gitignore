@@ -3,3 +3,7 @@ runs
 
 # Ignore models folder
 models
+
+# Ignore pdf
+puerto-rico-2players-rule.pdf
+puerto-rico-rules-en.pdf
