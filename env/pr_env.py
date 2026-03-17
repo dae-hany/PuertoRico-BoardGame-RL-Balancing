@@ -12,9 +12,10 @@ SHAPING_GAMMA = 0.99
 class PuertoRicoEnv(AECEnv):
     metadata = {'render.modes': ['human'], 'name': 'puerto_rico_v0'}
 
-    def __init__(self, num_players: int = 4):
+    def __init__(self, num_players: int = 4, max_game_steps: int = 2000):
         super(PuertoRicoEnv, self).__init__()
         self.num_players = num_players
+        self.max_game_steps = max_game_steps
         self.game = None
         
         self.possible_agents = [f"player_{i}" for i in range(self.num_players)]
@@ -102,6 +103,7 @@ class PuertoRicoEnv(AECEnv):
 
         self.game = PuertoRicoGame(self.num_players)
         self.game.start_game()
+        self._game_step_count = 0
         
         # Determine starting player based on engine
         self._agent_selector = agent_selector(self.agents)
@@ -247,9 +249,12 @@ class PuertoRicoEnv(AECEnv):
             self.agent_selection = self._agent_selector.next()
             return
 
+        self._game_step_count += 1
         done = self.game.check_game_end()
-        
+        truncated = False
+
         if done:
+            # Natural game end
             all_rewards = self._calculate_all_rewards()
             for idx, r in enumerate(all_rewards):
                 agent_name = f"player_{idx}"
@@ -259,8 +264,23 @@ class PuertoRicoEnv(AECEnv):
             final_scores = self.game.get_scores()
             for a in self.agents:
                 self.infos[a]["final_scores"] = final_scores
+
+        elif self._game_step_count >= self.max_game_steps:
+            # Truncation: game took too long (likely Mayor toggle loop with random policy)
+            truncated = True
+            all_rewards = self._calculate_all_rewards()
+            for idx, r in enumerate(all_rewards):
+                agent_name = f"player_{idx}"
+                self.rewards[agent_name] = r * 0.5  # Discount truncated rewards
+                self.truncations[agent_name] = True
+
+            final_scores = self.game.get_scores()
+            for a in self.agents:
+                self.infos[a]["final_scores"] = final_scores
+                self.infos[a]["truncated"] = True
+
         else:
-            # Dense reward shaping: acting player gets ΔΦ = Φ(s') - Φ(s) for their own state change.
+            # Dense reward shaping: acting player gets ΔΦ = Φ(s') - Φ(s)
             # Clipped to prevent large cumulative accumulation through PettingZoo AEC mechanics.
             acting_idx = player_idx
             new_potential = self._compute_potential(acting_idx)

@@ -40,7 +40,7 @@ LEARNING_PLAYER_IDX = 0      # Fixed player slot that learns
 
 
 def make_env():
-    return PuertoRicoEnv(num_players=NUM_PLAYERS)
+    return PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=2000)
 
 
 def sample_opponent_weights(opponent_pool: list, agent: Agent) -> dict:
