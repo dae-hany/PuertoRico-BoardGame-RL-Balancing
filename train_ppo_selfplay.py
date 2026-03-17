@@ -1,203 +1,360 @@
 import os
+import copy
 import time
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from collections import deque
 from torch.utils.tensorboard import SummaryWriter
 
 from env.pr_env import PuertoRicoEnv
 from utils.env_wrappers import flatten_dict_observation, get_flattened_obs_dim
 from agents.ppo_agent import Agent
 
-# Hyperparameters
+# --- Hyperparameters ---
+_TEST_MODE = os.environ.get("PPO_TEST_MODE", "0") == "1"
+
 NUM_PLAYERS = 3
-TOTAL_TIMESTEPS = 10000000
+TOTAL_TIMESTEPS = 500_000 if _TEST_MODE else 10_000_000
 LEARNING_RATE = 2.5e-4
-NUM_STEPS = 1000 # Steps per PPO rollout phase
-BATCH_SIZE = NUM_STEPS * NUM_PLAYERS
-MINIBATCH_SIZE = 125
+NUM_STEPS = 500 if _TEST_MODE else 4096  # Steps per PPO rollout (learning player only)
+BATCH_SIZE = NUM_STEPS
+MINIBATCH_SIZE = 128 if _TEST_MODE else 256
 UPDATE_EPOCHS = 4
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_COEF = 0.2
+VF_CLIP_COEF = 0.2  # Value function clipping coefficient
 ENT_COEF = 0.01
 VF_COEF = 0.5
 MAX_GRAD_NORM = 0.5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Self-play opponent pool settings
+SNAPSHOT_INTERVAL = 10       # Save snapshot every N updates
+OPPONENT_POOL_SIZE = 20      # Max pool size (FIFO)
+LATEST_POLICY_PROB = 0.8     # Probability of using latest policy as opponent
+LEARNING_PLAYER_IDX = 0      # Fixed player slot that learns
+
+
 def make_env():
     return PuertoRicoEnv(num_players=NUM_PLAYERS)
+
+
+def sample_opponent_weights(opponent_pool: list, agent: Agent) -> dict:
+    """Sample opponent weights: 80% latest policy, 20% from historical pool."""
+    if not opponent_pool or random.random() < LATEST_POLICY_PROB:
+        return agent.state_dict()
+    return random.choice(opponent_pool)
+
+
+def collect_rollout(env, agent, opponent_agent, opponent_pool,
+                    obs_buf, mask_buf, act_buf, logp_buf, rew_buf, done_buf, val_buf,
+                    obs_space, obs_dim, writer, global_step):
+    """Collect NUM_STEPS transitions for the learning player.
+    Opponents use a separate agent instance with sampled weights.
+    Returns updated global_step and game statistics.
+    """
+    learning_agent_name = f"player_{LEARNING_PLAYER_IDX}"
+    step_idx = 0
+    games_completed = 0
+    win_count = 0
+    total_score = 0.0
+    game_lengths = []
+    current_game_steps = 0
+
+    # Load opponent weights at game start
+    opp_weights = sample_opponent_weights(opponent_pool, agent)
+    opponent_agent.load_state_dict(opp_weights)
+    opponent_agent.eval()
+
+    while step_idx < NUM_STEPS:
+        for agent_name in env.agent_iter():
+            obs, reward, termination, truncation, info = env.last()
+
+            player_idx = int(agent_name.split("_")[1])
+            is_learner = (player_idx == LEARNING_PLAYER_IDX)
+
+            # Record reward from previous step for the learning player
+            if is_learner and step_idx > 0 and step_idx <= NUM_STEPS:
+                rew_buf[step_idx - 1] = reward
+
+            if termination or truncation:
+                if is_learner and step_idx < NUM_STEPS:
+                    done_buf[step_idx] = 1.0
+                env.step(None)
+
+                if all(env.terminations.values()):
+                    games_completed += 1
+                    current_game_steps_copy = current_game_steps
+
+                    # Log game result
+                    if learning_agent_name in env.infos and "final_scores" in env.infos[learning_agent_name]:
+                        scores = env.infos[learning_agent_name]["final_scores"]
+                        learner_score = scores[LEARNING_PLAYER_IDX][0]
+                        max_opp_score = max(scores[j][0] for j in range(NUM_PLAYERS) if j != LEARNING_PLAYER_IDX)
+                        total_score += learner_score
+                        if learner_score >= max_opp_score:
+                            win_count += 1
+                        writer.add_scalar("charts/episodic_score", learner_score, global_step)
+                        game_lengths.append(current_game_steps_copy)
+
+                    env.reset()
+                    current_game_steps = 0
+                    # Sample new opponent weights for next game
+                    opp_weights = sample_opponent_weights(opponent_pool, agent)
+                    opponent_agent.load_state_dict(opp_weights)
+                    opponent_agent.eval()
+                continue
+
+            # Prepare observation
+            obs_dict = obs["observation"]
+            mask = obs["action_mask"]
+            flat_obs = flatten_dict_observation(obs_dict, obs_space)
+            obs_tensor = torch.Tensor(flat_obs).to(DEVICE).unsqueeze(0)
+            mask_tensor = torch.Tensor(mask).to(DEVICE).unsqueeze(0)
+
+            if is_learner:
+                with torch.no_grad():
+                    action_sample, logprob, _, value = agent.get_action_and_value(obs_tensor, mask_tensor)
+
+                action_idx = action_sample.item()
+
+                if step_idx < NUM_STEPS:
+                    obs_buf[step_idx] = obs_tensor.squeeze(0)
+                    mask_buf[step_idx] = mask_tensor.squeeze(0)
+                    act_buf[step_idx] = action_sample.squeeze(0)
+                    logp_buf[step_idx] = logprob.squeeze(0)
+                    val_buf[step_idx] = value.squeeze(0)
+                    done_buf[step_idx] = 0.0
+                    step_idx += 1
+                    global_step += 1
+            else:
+                # Opponents act with their own policy (no gradient, no buffer recording)
+                with torch.no_grad():
+                    action_sample, _, _, _ = opponent_agent.get_action_and_value(obs_tensor, mask_tensor)
+                action_idx = action_sample.item()
+
+            env.step(action_idx)
+            current_game_steps += 1
+
+            if step_idx >= NUM_STEPS:
+                break
+
+        # Iterator exhausted (game ended mid-collection). Reset and continue.
+        if step_idx < NUM_STEPS:
+            env.reset()
+            current_game_steps = 0
+            opp_weights = sample_opponent_weights(opponent_pool, agent)
+            opponent_agent.load_state_dict(opp_weights)
+            opponent_agent.eval()
+
+    stats = {
+        "games": games_completed,
+        "wins": win_count,
+        "avg_score": total_score / max(games_completed, 1),
+        "avg_length": np.mean(game_lengths) if game_lengths else 0,
+    }
+    return global_step, stats
+
+
+def compute_gae(agent, obs_buf, rew_buf, done_buf, val_buf, obs_space, env):
+    """Compute GAE advantages with proper bootstrap at trajectory end."""
+    advantages = torch.zeros_like(rew_buf).to(DEVICE)
+
+    # Bootstrap: estimate value of the state AFTER the last collected step
+    # If last step was terminal, nextvalues=0 is correct. Otherwise, bootstrap with critic.
+    with torch.no_grad():
+        last_value = agent.get_value(obs_buf[-1].unsqueeze(0)).squeeze()
+
+    lastgaelam = 0.0
+    for t in reversed(range(NUM_STEPS)):
+        if t == NUM_STEPS - 1:
+            nextnonterminal = 1.0 - done_buf[t]
+            nextvalues = last_value * nextnonterminal
+        else:
+            nextnonterminal = 1.0 - done_buf[t + 1]
+            nextvalues = val_buf[t + 1] * nextnonterminal
+
+        delta = rew_buf[t] + GAMMA * nextvalues - val_buf[t]
+        advantages[t] = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+        lastgaelam = advantages[t]
+
+    returns = advantages + val_buf
+    return advantages, returns
+
+
+def ppo_update(agent, optimizer, obs_buf, mask_buf, act_buf, logp_buf,
+               advantages, returns, val_buf, writer, global_step):
+    """Perform PPO policy and value updates with clipping."""
+    b_inds = np.arange(BATCH_SIZE)
+    clipfracs = []
+
+    for epoch in range(UPDATE_EPOCHS):
+        np.random.shuffle(b_inds)
+        for start in range(0, BATCH_SIZE, MINIBATCH_SIZE):
+            end = start + MINIBATCH_SIZE
+            mb_inds = b_inds[start:end]
+
+            _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                obs_buf[mb_inds], mask_buf[mb_inds], act_buf[mb_inds]
+            )
+            logratio = newlogprob - logp_buf[mb_inds]
+            ratio = logratio.exp()
+
+            with torch.no_grad():
+                approx_kl = ((ratio - 1) - logratio).mean()
+                clipfracs.append(((ratio - 1.0).abs() > CLIP_COEF).float().mean().item())
+
+            mb_advantages = advantages[mb_inds]
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+            # Clipped policy loss
+            pg_loss1 = -mb_advantages * ratio
+            pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - CLIP_COEF, 1 + CLIP_COEF)
+            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+            # Clipped value loss
+            newvalue = newvalue.squeeze(-1)
+            v_clipped = val_buf[mb_inds] + torch.clamp(
+                newvalue - val_buf[mb_inds], -VF_CLIP_COEF, VF_CLIP_COEF
+            )
+            v_loss_unclipped = (newvalue - returns[mb_inds]) ** 2
+            v_loss_clipped = (v_clipped - returns[mb_inds]) ** 2
+            v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+
+            entropy_loss = entropy.mean()
+            loss = pg_loss - ENT_COEF * entropy_loss + v_loss * VF_COEF
+
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), MAX_GRAD_NORM)
+            optimizer.step()
+
+    # Log training metrics
+    writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+    writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+    writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+    writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+    writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+    writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+
+    return v_loss.item(), pg_loss.item()
+
 
 def train():
     run_name = f"PPO_PuertoRico_{NUM_PLAYERS}P_{int(time.time())}"
     writer = SummaryWriter(f"runs/{run_name}")
-    
+
     env = make_env()
     env.reset()
-    
-    obs_space = env.observation_space(env.possible_agents[0])['observation']
+
+    obs_space = env.observation_space(env.possible_agents[0])["observation"]
     obs_dim = get_flattened_obs_dim(obs_space)
     action_dim = env.action_space(env.possible_agents[0]).n
-    
+
+    # Learning agent
     agent = Agent(obs_dim=obs_dim, action_dim=action_dim).to(DEVICE)
     optimizer = optim.Adam(agent.parameters(), lr=LEARNING_RATE, eps=1e-5)
-    
-    # Replay Buffers
-    obs_buffers = {p: torch.zeros((NUM_STEPS, obs_dim)).to(DEVICE) for p in env.possible_agents}
-    mask_buffers = {p: torch.zeros((NUM_STEPS, action_dim)).to(DEVICE) for p in env.possible_agents}
-    action_buffers = {p: torch.zeros((NUM_STEPS,)).to(DEVICE) for p in env.possible_agents}
-    logprob_buffers = {p: torch.zeros((NUM_STEPS,)).to(DEVICE) for p in env.possible_agents}
-    reward_buffers = {p: torch.zeros((NUM_STEPS,)).to(DEVICE) for p in env.possible_agents}
-    done_buffers = {p: torch.zeros((NUM_STEPS,)).to(DEVICE) for p in env.possible_agents}
-    value_buffers = {p: torch.zeros((NUM_STEPS,)).to(DEVICE) for p in env.possible_agents}
+
+    # Opponent agent (separate instance, same architecture, no optimizer)
+    opponent_agent = Agent(obs_dim=obs_dim, action_dim=action_dim).to(DEVICE)
+    opponent_agent.load_state_dict(agent.state_dict())
+    opponent_agent.eval()
+
+    # Opponent pool for self-play diversity
+    opponent_pool = []
+
+    # Replay buffers (learning player only)
+    obs_buf = torch.zeros((NUM_STEPS, obs_dim)).to(DEVICE)
+    mask_buf = torch.zeros((NUM_STEPS, action_dim)).to(DEVICE)
+    act_buf = torch.zeros((NUM_STEPS,)).to(DEVICE)
+    logp_buf = torch.zeros((NUM_STEPS,)).to(DEVICE)
+    rew_buf = torch.zeros((NUM_STEPS,)).to(DEVICE)
+    done_buf = torch.zeros((NUM_STEPS,)).to(DEVICE)
+    val_buf = torch.zeros((NUM_STEPS,)).to(DEVICE)
 
     global_step = 0
     num_updates = TOTAL_TIMESTEPS // BATCH_SIZE
-    
-    print(f"Starting Training on {DEVICE}. Total Updates: {num_updates}")
-    
+    win_history = deque(maxlen=100)
+
+    print(f"Starting Training on {DEVICE}")
+    print(f"  obs_dim={obs_dim}, action_dim={action_dim}")
+    print(f"  NUM_STEPS={NUM_STEPS}, BATCH_SIZE={BATCH_SIZE}, Updates={num_updates}")
+    print(f"  Network params: {sum(p.numel() for p in agent.parameters()):,}")
+
     for update in range(1, num_updates + 1):
+        update_start = time.time()
+
+        # Linear LR annealing
         frac = 1.0 - (update - 1.0) / num_updates
         lrnow = frac * LEARNING_RATE
         optimizer.param_groups[0]["lr"] = lrnow
-        
-        step_count = 0
-        total_steps = NUM_STEPS * len(env.possible_agents)
-        idx_count = {p: 0 for p in env.possible_agents}
-        
-        while step_count < total_steps:
-            # We must instantiate agent_iter repeatedly because it exhausts when game ends
-            for agent_name in env.agent_iter():
-                idx = idx_count[agent_name]
-                
-                # If buffer is full, we must still step to not break PettingZoo, but we discard data.
-                obs, reward, termination, truncation, info = env.last()
-                
-                if idx > 0 and idx <= NUM_STEPS:
-                    reward_buffers[agent_name][idx - 1] = reward
-                    
-                if termination or truncation:
-                    if idx < NUM_STEPS:
-                        done_buffers[agent_name][idx] = 1.0
-                    env.step(None)
-                    
-                    # If all players are dead, PettingZoo iterator will naturally exhaust on this turn.
-                    # We just log the score BEFORE resetting.
-                    if all(env.terminations.values()): 
-                        for p in env.possible_agents:
-                            if p in env.infos and "player_rewards" in env.infos[p]:
-                                writer.add_scalar(f"charts/episodic_return_{p}", env.infos[p]["player_rewards"], global_step)
-                        env.reset()
-                    continue
-                    
-                # Normal Step
-                obs_dict = obs["observation"]
-                mask = obs["action_mask"]
-                
-                flat_obs = flatten_dict_observation(obs_dict, obs_space)
-                obs_tensor = torch.Tensor(flat_obs).to(DEVICE).unsqueeze(0)
-                mask_tensor = torch.Tensor(mask).to(DEVICE).unsqueeze(0)
-                
-                with torch.no_grad():
-                    action_sample, logprob, _, value = agent.get_action_and_value(obs_tensor, mask_tensor)
-                    
-                action_idx = action_sample.item()
-                
-                if idx < NUM_STEPS:
-                    obs_buffers[agent_name][idx] = obs_tensor.squeeze(0)
-                    mask_buffers[agent_name][idx] = mask_tensor.squeeze(0)
-                    action_buffers[agent_name][idx] = action_sample.squeeze(0)
-                    logprob_buffers[agent_name][idx] = logprob.squeeze(0)
-                    value_buffers[agent_name][idx] = value.squeeze(0)
-                    done_buffers[agent_name][idx] = 0.0
-                    
-                    idx_count[agent_name] += 1
-                    step_count += 1
-                    
-                env.step(action_idx)
-                
-                if step_count >= total_steps:
-                    break
-                    
-            # Iterator exhausted (Game ended). Reset environment and start next loop seamlessly.
-            if step_count < total_steps:
-                env.reset()
-                
-        print(f"Update {update}/{num_updates} - Data Collection Complete")
-        
-        # --- GAE Advantage Calculation & Actor-Critic Updates ---
-        b_obs = torch.cat(list(obs_buffers.values()), dim=0)
-        b_masks = torch.cat(list(mask_buffers.values()), dim=0)
-        b_actions = torch.cat(list(action_buffers.values()), dim=0)
-        b_logprobs = torch.cat(list(logprob_buffers.values()), dim=0)
-        b_rewards = torch.cat(list(reward_buffers.values()), dim=0)
-        b_dones = torch.cat(list(done_buffers.values()), dim=0)
-        b_values = torch.cat(list(value_buffers.values()), dim=0)
-        
-        b_advantages = torch.zeros_like(b_rewards).to(DEVICE)
-        
-        # We calculate simplistic advantage since PettingZoo multi-agent tracking 
-        # requires complex graph unwrapping for precise next-state value mapping.
-        # For this baseline, we use Monte-Carlo style returns approximated per agent buffer.
-        for p in env.possible_agents:
-            lastgaelam = 0
-            for t in reversed(range(NUM_STEPS)):
-                if t == NUM_STEPS - 1:
-                    nextnonterminal = 1.0 - done_buffers[p][t]
-                    nextvalues = 0 # Approximate
-                else:
-                    nextnonterminal = 1.0 - done_buffers[p][t + 1]
-                    nextvalues = value_buffers[p][t + 1]
-                    
-                delta = reward_buffers[p][t] + GAMMA * nextvalues * nextnonterminal - value_buffers[p][t]
-                b_advantages_p = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
-                lastgaelam = b_advantages_p
-                # Assign back to flattened buffer
-                idx_offset = env.possible_agents.index(p) * NUM_STEPS
-                b_advantages[idx_offset + t] = b_advantages_p
-        
-        b_returns = b_advantages + b_values
-        
-        # Optimize Policy and Value networks
-        b_inds = np.arange(BATCH_SIZE)
-        clipfracs = []
-        for epoch in range(UPDATE_EPOCHS):
-            np.random.shuffle(b_inds)
-            for start in range(0, BATCH_SIZE, MINIBATCH_SIZE):
-                end = start + MINIBATCH_SIZE
-                mb_inds = b_inds[start:end]
-                
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_masks[mb_inds], b_actions[mb_inds])
-                logratio = newlogprob - b_logprobs[mb_inds]
-                ratio = logratio.exp()
-                
-                mb_advantages = b_advantages[mb_inds]
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-                
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - CLIP_COEF, 1 + CLIP_COEF)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                
-                v_loss = 0.5 * ((newvalue.squeeze(-1) - b_returns[mb_inds]) ** 2).mean()
-                entropy_loss = entropy.mean()
-                
-                loss = pg_loss - ENT_COEF * entropy_loss + v_loss * VF_COEF
-                
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), MAX_GRAD_NORM)
-                optimizer.step()
-                
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        
-        print(f"Update {update}/{num_updates} | Value Loss: {v_loss.item():.4f} | Policy Loss: {pg_loss.item():.4f}")
-        
+
+        # --- Data Collection ---
+        global_step, stats = collect_rollout(
+            env, agent, opponent_agent, opponent_pool,
+            obs_buf, mask_buf, act_buf, logp_buf, rew_buf, done_buf, val_buf,
+            obs_space, obs_dim, writer, global_step
+        )
+
+        # Track win history
+        if stats["games"] > 0:
+            for _ in range(stats["wins"]):
+                win_history.append(1)
+            for _ in range(stats["games"] - stats["wins"]):
+                win_history.append(0)
+
+        # --- GAE + PPO Update ---
+        advantages, returns = compute_gae(agent, obs_buf, rew_buf, done_buf, val_buf, obs_space, env)
+        v_loss, pg_loss = ppo_update(
+            agent, optimizer, obs_buf, mask_buf, act_buf, logp_buf,
+            advantages, returns, val_buf, writer, global_step
+        )
+
+        # --- Self-Play Opponent Pool Management ---
+        if update % SNAPSHOT_INTERVAL == 0:
+            snapshot = copy.deepcopy(agent.state_dict())
+            opponent_pool.append(snapshot)
+            if len(opponent_pool) > OPPONENT_POOL_SIZE:
+                opponent_pool.pop(0)
+
+        # --- Logging ---
+        sps = NUM_STEPS / (time.time() - update_start)
+        win_rate = np.mean(win_history) if win_history else 0.0
+        writer.add_scalar("charts/win_rate", win_rate, global_step)
+        writer.add_scalar("charts/SPS", sps, global_step)
+        writer.add_scalar("charts/opponent_pool_size", len(opponent_pool), global_step)
+
+        if stats["games"] > 0:
+            writer.add_scalar("charts/avg_game_length", stats["avg_length"], global_step)
+            writer.add_scalar("charts/avg_score", stats["avg_score"], global_step)
+
+        print(
+            f"Update {update}/{num_updates} | "
+            f"VLoss: {v_loss:.4f} | PLoss: {pg_loss:.4f} | "
+            f"WinRate: {win_rate:.2%} | "
+            f"Games: {stats['games']} | "
+            f"SPS: {sps:.0f} | "
+            f"Step: {global_step}"
+        )
+
+        # --- Checkpoint ---
         if update % 10 == 0:
             os.makedirs("models", exist_ok=True)
-            torch.save(agent.state_dict(), f"models/ppo_agent_update_{update}.pth")
+            torch.save({
+                "model_state_dict": agent.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": global_step,
+                "update": update,
+                "opponent_pool_size": len(opponent_pool),
+            }, f"models/ppo_checkpoint_update_{update}.pth")
+
+    writer.close()
+    print("Training complete!")
+
 
 if __name__ == "__main__":
     train()

@@ -6,6 +6,9 @@ import numpy as np
 from env.engine import PuertoRicoGame
 from configs.constants import Phase, Role, Good, TileType, BuildingType, BUILDING_DATA
 
+# Discount factor for potential-based reward shaping (must match PPO gamma)
+SHAPING_GAMMA = 0.99
+
 class PuertoRicoEnv(AECEnv):
     metadata = {'render.modes': ['human'], 'name': 'puerto_rico_v0'}
 
@@ -103,6 +106,11 @@ class PuertoRicoEnv(AECEnv):
         # Determine starting player based on engine
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = f"player_{self.game.current_player_idx}"
+        
+        # Initialize potential tracking for reward shaping
+        self._prev_potentials = {
+            f"player_{i}": self._compute_potential(i) for i in range(self.num_players)
+        }
         
         # Populate initial info
         for agent in self.agents:
@@ -230,16 +238,12 @@ class PuertoRicoEnv(AECEnv):
                 self.game.action_hacienda_draw(player_idx)
                             
         except ValueError as e:
-            # Invalid action taken. AECEnv requires handling this gracefully or crashing.
-            # Penalize heavily and terminate this agent. Since Puerto Rico is rigid, if one player is terminated, the game usually breaks.
-            # We'll terminate the game for everyone with a negative reward for the offender.
-            self.rewards[agent] = -50.0
+            # Invalid action penalty (reduced to -10 to avoid value function distortion)
+            self.rewards[agent] = -10.0
             for a in self.agents:
                 self.terminations[a] = True
                 self.infos[a]["error"] = str(e)
             self._accumulate_rewards()
-            
-            # Since game is over, agent_selection logic doesn't matter much, just pass to next
             self.agent_selection = self._agent_selector.next()
             return
 
@@ -256,9 +260,21 @@ class PuertoRicoEnv(AECEnv):
             for a in self.agents:
                 self.infos[a]["final_scores"] = final_scores
         else:
-            for a in self.agents:
-                self.rewards[a] = 0.0
-                self.infos[a] = self._get_info()
+            # Dense reward shaping: acting player gets ΔΦ = Φ(s') - Φ(s) for their own state change.
+            # Clipped to prevent large cumulative accumulation through PettingZoo AEC mechanics.
+            acting_idx = player_idx
+            new_potential = self._compute_potential(acting_idx)
+            old_potential = self._prev_potentials[f"player_{acting_idx}"]
+            shaping_reward = max(-0.5, min(0.5, new_potential - old_potential))
+            self.rewards[f"player_{acting_idx}"] = shaping_reward
+
+            # Update potentials for all players (state may have changed globally)
+            for i in range(self.num_players):
+                a_name = f"player_{i}"
+                self._prev_potentials[a_name] = self._compute_potential(i)
+                if i != acting_idx:
+                    self.rewards[a_name] = 0.0
+                self.infos[a_name] = self._get_info()
 
         self.agent_selection = f"player_{self.game.current_player_idx}"
         self._accumulate_rewards()
@@ -382,14 +398,30 @@ class PuertoRicoEnv(AECEnv):
                 info["player_rewards"] = self._final_rewards
         return info
 
-    def _calculate_all_rewards(self) -> list[float]:
+    def _compute_potential(self, player_idx: int) -> float:
+        """Potential function for reward shaping (Ng et al., 1999).
+        Higher potential = more developed player state.
+        Provably preserves optimal policy when used as: gamma * Phi(s') - Phi(s).
         """
-        Calculates competitive rewards at the end of the game for all players.
-        Absolute score encourages game stalling to farm points. To teach the agent
-        strategic pacing (e.g., rushing game end when ahead), the reward must be competitive.
-        
-        Using: (1) Win/Loss large sparse reward (±1.0)
-               (2) Small dense shaping based on score margin against the best opponent (* 0.01)
+        p = self.game.players[player_idx]
+        phi = 0.0
+        phi += p.vp_chips * 0.05                  # VP chip accumulation
+        phi += p.doubloons * 0.01                  # Economic power
+        # Occupied production buildings contribute to future goods production
+        occupied_production = sum(
+            1 for b in p.city_board
+            if BUILDING_DATA[b.building_type][5] is not None and b.colonists > 0
+        )
+        phi += occupied_production * 0.03
+        phi += sum(p.goods.values()) * 0.005       # Current stockpile
+        # Occupied island tiles = productive land
+        occupied_island = sum(1 for t in p.island_board if t.is_occupied)
+        phi += occupied_island * 0.01
+        return phi
+
+    def _calculate_all_rewards(self) -> list[float]:
+        """Terminal reward: competitive win/loss + score margin.
+        Dense shaping is handled separately via potentials in step().
         """
         scores = self.game.get_scores()
         totals = [vp + tb * 0.0001 for vp, tb in scores]
@@ -399,12 +431,10 @@ class PuertoRicoEnv(AECEnv):
             my_total = totals[i]
             max_opp_total = max(totals[j] for j in range(self.num_players) if j != i)
             
-            # 1. Win/Loss (Zero-sum fundamental)
             is_winner = my_total >= max_opp_total
             win_reward = 1.0 if is_winner else -1.0
-            
-            # 2. Score Margin Shaping
-            margin = (my_total - max_opp_total) * 0.01
+            # Increased margin weight for better score differentiation
+            margin = (my_total - max_opp_total) * 0.02
             
             rewards.append(win_reward + margin)
             
