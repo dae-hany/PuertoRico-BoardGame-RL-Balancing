@@ -243,7 +243,7 @@ class PuertoRicoEnv(AECEnv):
                 self.infos[a]["final_scores"] = final_scores
 
         elif self._game_step_count >= self.max_game_steps:
-            # Truncation: game took too long (likely Mayor toggle loop with random policy)
+            # Truncation: game took too long (e.g. infinite loops or very slow play)
             truncated = True
             all_rewards = self._calculate_all_rewards()
             for idx, r in enumerate(all_rewards):
