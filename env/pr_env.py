@@ -145,6 +145,9 @@ class PuertoRicoEnv(AECEnv):
             return
 
         agent = self.agent_selection
+        # AEC bookkeeping: reset this agent's running return before applying current-step rewards.
+        self._cumulative_rewards[agent] = 0.0
+        self._clear_rewards()
         player_idx = self.agent_name_mapping[agent]
         p = self.game.players[player_idx]
         
@@ -246,7 +249,7 @@ class PuertoRicoEnv(AECEnv):
                 self.terminations[a] = True
                 self.infos[a]["error"] = str(e)
             self._accumulate_rewards()
-            self.agent_selection = self._agent_selector.next()
+            self.agent_selection = f"player_{self.game.current_player_idx}"
             return
 
         self._game_step_count += 1
