@@ -69,6 +69,7 @@ class PuertoRicoGame:
         self.active_role_player: int = -1
         
         # Phase-specific tracking flags
+        self.mayor_placement_idx = 0 # Tracks sequential placement (0-23)
         self._captain_privilege_used = False
         self._wharf_used = {i: False for i in range(num_players)}
         self._captain_passed_players = set()
@@ -299,6 +300,10 @@ class PuertoRicoGame:
                 self.players[idx].unplaced_colonists += 1
                 self.colonists_ship -= 1
                 idx = (idx + 1) % self.num_players
+            
+            # Start sequential placement for first player
+            self._init_mayor_placement(self.current_player_idx)
+
         elif role == Role.BUILDER:
             self.current_phase = Phase.BUILDER
         elif role == Role.CRAFTSMAN:
@@ -324,6 +329,12 @@ class PuertoRicoGame:
             # Immediately end phase as prospector has no action for others
             self._end_phase()
             
+    def _init_mayor_placement(self, player_idx: int):
+        """Prepares a player for sequential colonist placement."""
+        p = self.players[player_idx]
+        p.recall_all_colonists()
+        self.mayor_placement_idx = 0
+
     def _advance_phase_turn(self):
         """Advances turn to next player in the current phase."""
         if self.current_phase == Phase.CAPTAIN:
@@ -336,6 +347,15 @@ class PuertoRicoGame:
                 self._next_player()
                 while self.current_player_idx in self._captain_passed_players:
                     self._next_player()
+        elif self.current_phase == Phase.MAYOR:
+            # Mayor phase uses sequential placement logic
+            self.players_taken_action += 1
+            if self.players_taken_action >= self.num_players:
+                self._execute_phase_cleanup()
+                self._end_phase()
+            else:
+                self._next_player()
+                self._init_mayor_placement(self.current_player_idx)
         else:
             self.players_taken_action += 1
             # 중복 사용 방지 : 한 플레이어가 자신의 한 차례에 하시엔다를 두 번 쓰는 것을 막음
@@ -351,6 +371,57 @@ class PuertoRicoGame:
     def active_role_player_idx(self) -> int:
         """Returns the idx of the player who picked the current active role."""
         return self.active_role_player
+
+    def action_mayor_place(self, player_idx: int, amount: int):
+        """
+        Sequentially places colonists on the current slot (mayor_placement_idx).
+        0-11: Island slots
+        12-23: Building slots
+        """
+        if self.current_phase != Phase.MAYOR or self.current_player_idx != player_idx:
+            raise ValueError("Not this player's turn in Mayor phase.")
+        
+        p = self.players[player_idx]
+        
+        # Check capacity of current slot
+        idx = self.mayor_placement_idx
+        is_island = idx < 12
+        slot_idx = idx if is_island else idx - 12
+        
+        capacity = 0
+        if is_island:
+            if slot_idx < len(p.island_board):
+                tile = p.island_board[slot_idx]
+                if tile.tile_type != TileType.EMPTY:
+                    capacity = 1
+        else:
+            if slot_idx < len(p.city_board):
+                b = p.city_board[slot_idx]
+                if b.building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE):
+                    capacity = BUILDING_DATA[b.building_type][2]
+
+        # Validate amount
+        if amount > capacity:
+            raise ValueError(f"Cannot place {amount} colonists on slot with capacity {capacity}.")
+        if amount > p.unplaced_colonists:
+            raise ValueError(f"Not enough colonists ({p.unplaced_colonists}) to place {amount}.")
+            
+        # Apply placement
+        if amount > 0:
+            if is_island:
+                p.island_board[slot_idx].is_occupied = True
+                p.unplaced_colonists -= 1
+            else:
+                p.city_board[slot_idx].colonists = amount
+                p.unplaced_colonists -= amount
+                
+        # Advance slot
+        self.mayor_placement_idx += 1
+        
+        # Check if placement sequence is complete (all slots visited)
+        # We iterate through ALL 24 slots to keep fixed horizon
+        if self.mayor_placement_idx >= 24:
+            self._advance_phase_turn()
 
     def _execute_craftsman_production(self):
         """Auto-produce goods for all players strictly in order starting from active_role_player."""
@@ -528,60 +599,6 @@ class PuertoRicoGame:
                 p.island_board[-1].is_occupied = True
                 self.colonists_ship -= 1
                 
-        self._advance_phase_turn()
-
-    def action_mayor_pass(self, player_idx: int, island_assignment: List[bool], city_assignment: List[int]):
-        """
-        Since Mayor phase involves combinatorial placement, the agent submits the final configuration.
-        island_assignment: boolean list matching length of player's island_board
-        city_assignment: integer list matching length of player's city_board (count of colonists in each)
-        """
-        if self.current_phase != Phase.MAYOR or self.current_player_idx != player_idx:
-            raise ValueError("Not this player's turn in Mayor phase.")
-            
-        p = self.players[player_idx]
-        
-        # Validate total colonists
-        total_placed = sum(island_assignment) + sum(city_assignment)
-        if total_placed > p.total_colonists_owned:
-            raise ValueError("Attempting to place more colonists than owned.")
-            
-        # Validate capacities
-        if len(island_assignment) != len(p.island_board):
-            raise ValueError("Mismatch in island board length.")
-        if len(city_assignment) != len(p.city_board):
-            raise ValueError("Mismatch in city board length.")
-            
-        # Validation: Player MUST place as many colonists as possible. Cannot hoard if empty valid slots exist.
-        empty_island = sum(1 for v in island_assignment if not v) # Number of empty island spaces being submitted
-        empty_city = 0
-        for i, val in enumerate(city_assignment):
-            b_type = p.city_board[i].building_type
-            if b_type != BuildingType.OCCUPIED_SPACE:
-                max_cap = BUILDING_DATA[b_type][2]
-                empty_city += (max_cap - val)
-            else:
-                if val > 0:
-                    raise ValueError("Cannot place colonists on an occupied space dummy.")
-            
-        leftover_colonists = p.total_colonists_owned - total_placed
-        if leftover_colonists > 0 and (empty_island > 0 or empty_city > 0):
-            raise ValueError(f"Rule Violation: Must place all colonists if possible. Attempted to hoard {leftover_colonists} while having {empty_island}+{empty_city} empty spaces.")
-            
-        for i, val in enumerate(island_assignment):
-            p.island_board[i].is_occupied = val
-            
-        for i, val in enumerate(city_assignment):
-            b_type = p.city_board[i].building_type
-            if b_type != BuildingType.OCCUPIED_SPACE:
-                max_cap = BUILDING_DATA[b_type][2]
-                p.city_board[i].colonists = val
-            else:
-                p.city_board[i].colonists = 0
-            
-        # Any remaining are returned to unplaced (San Juan)
-        p.unplaced_colonists = leftover_colonists
-        
         self._advance_phase_turn()
 
     def action_builder(self, player_idx: int, building_choice: Optional[BuildingType]):

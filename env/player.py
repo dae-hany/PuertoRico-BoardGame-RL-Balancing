@@ -83,3 +83,12 @@ class Player:
         count += sum(1 for t in self.island_board if t.is_occupied)
         count += sum(b.colonists for b in self.city_board)
         return count
+
+    def recall_all_colonists(self):
+        """Moves all colonists from board to unplaced_colonists."""
+        total = self.total_colonists_owned
+        for t in self.island_board:
+            t.is_occupied = False
+        for b in self.city_board:
+            b.colonists = 0
+        self.unplaced_colonists = total

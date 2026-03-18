@@ -103,7 +103,7 @@ HEAD_HIDDEN_DIMS = {
     "role_select": 512,   # Strategic role choice — most important
     "settler":     256,   # ~8 options (plantations + quarry + pass)
     "builder":     512,   # 23 buildings — complex long-term investment
-    "mayor":       512,   # Combinatorial colonist placement, high data volume
+    "mayor":       128,   # Sequential decision (0-3 options), simple context
     "craftsman":   128,   # 5 goods at most — simplest decision, fewest samples
     "trader":      256,   # ~6 options (5 goods + pass)
     "captain":     512,   # ship×good combos + wharf + store — multi-step

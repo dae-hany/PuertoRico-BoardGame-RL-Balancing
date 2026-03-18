@@ -35,8 +35,7 @@ class PuertoRicoEnv(AECEnv):
         # 44-58:   Captain - Load (ship_idx * 5 + good_type)
         # 59-63:   Captain - Load via Wharf (Good 0~4)
         # 64-68:   Captain Store Windrose - Keep Good (Good 0~4)
-        # 69-80:   Mayor - Toggle island slot (0~11)
-        # 81-92:   Mayor - Toggle city slot (0~11)
+        # 69-72:   Mayor - Place Colonists (0, 1, 2, 3) on current slot (sequential)
         # 93-97:   Craftsman - Privilege good selection (Good 0~4)
         # 98-103:  (Deprecated) Settler WITH Hacienda - Face up plantation (index 0~5)
         # 104:     (Deprecated) Settler WITH Hacienda - Take Quarry
@@ -68,7 +67,8 @@ class PuertoRicoEnv(AECEnv):
                     "quarry_stack": spaces.Discrete(9),
                     "governor_idx": spaces.Discrete(self.num_players),
                     "current_player": spaces.Discrete(self.num_players),
-                    "current_phase": spaces.Discrete(10)
+                    "current_phase": spaces.Discrete(10),
+                    "mayor_slot_idx": spaces.Discrete(25) # 0-23 for slots, 24 for inactive
                 }),
                 "players": spaces.Dict({
                     f"player_{i}": spaces.Dict({
@@ -198,36 +198,10 @@ class PuertoRicoEnv(AECEnv):
                 g_type = Good(action - 106)
                 self.game.action_captain_store_warehouse(player_idx, g_type)
                 
-            elif 69 <= action <= 92:
-                # Mayor Toggle
-                if action <= 80:
-                    idx = action - 69
-                    if idx < len(p.island_board):
-                        tile = p.island_board[idx]
-                        if tile.tile_type != TileType.EMPTY:
-                            if not tile.is_occupied and p.unplaced_colonists > 0:
-                                tile.is_occupied = True
-                                p.unplaced_colonists -= 1
-                            elif tile.is_occupied:
-                                tile.is_occupied = False
-                                p.unplaced_colonists += 1
-                else:
-                    idx = action - 81
-                    if idx < len(p.city_board):
-                        b = p.city_board[idx]
-                        if b.building_type != BuildingType.EMPTY and b.building_type != BuildingType.OCCUPIED_SPACE:
-                            max_cap = BUILDING_DATA[b.building_type][2]
-                            if max_cap > 0:
-                                old_c = b.colonists
-                                new_c = (old_c + 1) % (max_cap + 1)
-                                diff = new_c - old_c
-                                if diff > 0: # Adding a colonist
-                                    if p.unplaced_colonists >= diff:
-                                        b.colonists = new_c
-                                        p.unplaced_colonists -= diff
-                                else: # Wrapped around, removing colonists
-                                    b.colonists = new_c
-                                    p.unplaced_colonists += (-diff)
+            elif 69 <= action <= 72:
+                # Mayor Sequential Placement
+                amount = action - 69
+                self.game.action_mayor_place(player_idx, amount)
                             
             elif 93 <= action <= 97:
                 # Craftsman Privilege
@@ -318,11 +292,9 @@ class PuertoRicoEnv(AECEnv):
         elif self.game.current_phase == Phase.CAPTAIN_STORE:
             self.game.action_captain_store_pass(player_idx)
         elif self.game.current_phase == Phase.MAYOR:
-            # During Mayor pass, we must solidify the board and call the engine pass
-            p = self.game.players[player_idx]
-            island_assgn = [t.is_occupied for t in p.island_board]
-            city_assgn = [b.colonists for b in p.city_board]
-            self.game.action_mayor_pass(player_idx, island_assgn, city_assgn)
+            # Mayor sequential placement doesn't use Pass action.
+            # Masking should prevent this.
+            raise ValueError("Cannot pass in Mayor phase sequential placement.")
         elif self.game.current_phase == Phase.CRAFTSMAN:
             self.game.action_craftsman(player_idx, privilege_good=None)
         else:
@@ -376,7 +348,8 @@ class PuertoRicoEnv(AECEnv):
             "quarry_stack": np.array(game.quarry_stack, dtype=np.int64),
             "governor_idx": np.array(game.governor_idx, dtype=np.int64),
             "current_player": np.array(game.current_player_idx, dtype=np.int64),
-            "current_phase": np.array(game.current_phase if game.current_phase is not None else 9, dtype=np.int64)
+            "current_phase": np.array(game.current_phase if game.current_phase is not None else 9, dtype=np.int64),
+            "mayor_slot_idx": np.array(game.mayor_placement_idx, dtype=np.int64)
         }
 
         # Player States
@@ -589,29 +562,77 @@ class PuertoRicoEnv(AECEnv):
                         mask[106 + g.value] = True
                     
         elif phase == Phase.MAYOR:
-            # Toggle actions
+            # Sequential Placement Masking
+            # We must determine valid range [min_place, max_place] for the CURRENT slot.
             
-            # Check if passing is allowed
-            total_placed = sum([1 for t in p.island_board if t.is_occupied]) + sum([b.colonists for b in p.city_board])
-            empty_island = sum([1 for t in p.island_board if t.tile_type != TileType.EMPTY and not t.is_occupied])
-            empty_city = 0
-            for b in p.city_board:
-                if b.building_type != BuildingType.EMPTY and b.building_type != BuildingType.OCCUPIED_SPACE:
-                    max_cap = BUILDING_DATA[b.building_type][2]
-                    empty_city += (max_cap - b.colonists)
-                    
-            leftover_colonists = p.total_colonists_owned - total_placed
-            can_pass = (leftover_colonists == 0) or (empty_island == 0 and empty_city == 0)
+            idx = game.mayor_placement_idx
+            p = game.players[game.current_player_idx]
             
-            if can_pass:
-                mask[15] = True # Pass (Submit)
+            # 1. Determine Capacity of Current Slot (S_k)
+            current_capacity = 0
+            is_island = idx < 12
+            slot_idx = idx if is_island else idx - 12
+            
+            if is_island:
+                if slot_idx < len(p.island_board):
+                    tile = p.island_board[slot_idx]
+                    if tile.tile_type != TileType.EMPTY:
+                        current_capacity = 1
+            else:
+                if slot_idx < len(p.city_board):
+                    b = p.city_board[slot_idx]
+                    if b.building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE):
+                        current_capacity = BUILDING_DATA[b.building_type][2]
+            
+            # 2. Determine Future Capacity (Sum S_{k+1...N})
+            future_capacity = 0
+            
+            # Count island slots from idx+1 onwards
+            island_start_scan = idx + 1
+            if island_start_scan < 12:
+                for i in range(island_start_scan, 12):
+                     if i < len(p.island_board) and p.island_board[i].tile_type != TileType.EMPTY:
+                         future_capacity += 1
+            
+            # Count city slots from (idx+1 if city, else 0 if island)
+            if idx < 12:
+                city_start_scan = 0
+            else:
+                city_start_scan = idx + 1 - 12
                 
-            for i in range(len(p.island_board)):
-                if p.island_board[i].tile_type != TileType.EMPTY:
-                    mask[69 + i] = True
-            for i in range(len(p.city_board)):
-                if p.city_board[i].building_type != BuildingType.EMPTY and p.city_board[i].building_type != BuildingType.OCCUPIED_SPACE:
-                    mask[81 + i] = True
+            for i in range(city_start_scan, 12):
+                if i < len(p.city_board):
+                    b = p.city_board[i]
+                    if b.building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE):
+                        future_capacity += BUILDING_DATA[b.building_type][2]
+            
+            # 3. Determine Available Colonists
+            available = p.unplaced_colonists
+            
+            # 4. Calculate Valid Range
+            min_place = max(0, available - future_capacity)
+            max_place = min(current_capacity, available)
+            
+            # 5. Apply Mask
+            valid_found = False
+            
+            # Important: if current_capacity is 0, we can only place 0.
+            if current_capacity == 0:
+                mask[69] = True
+                valid_found = True
+            else:
+                if min_place <= max_place:
+                    for amount in range(min_place, max_place + 1):
+                        # Action 69 maps to 0 colonists, 70->1, 71->2, 72->3
+                        if 0 <= amount <= 3:
+                            mask[69 + amount] = True
+                            valid_found = True
+            
+            if not valid_found:
+                 # Should not happen if board and logic are consistent
+                 # Fallback: Allow placement up to max_place
+                 for amount in range(max_place + 1):
+                     mask[69 + amount] = True
 
         elif phase == Phase.CRAFTSMAN:
             has_privilege = (game.current_player_idx == game.active_role_player_idx())

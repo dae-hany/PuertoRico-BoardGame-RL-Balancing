@@ -114,11 +114,57 @@ class TestPuertoRicoGame2Player(unittest.TestCase):
                 self.game.action_settler(expected_player, tile_choice=-2)
                 self.game.action_settler((expected_player + 1) % 2, tile_choice=-2)
             elif role == Role.MAYOR:
-                for target_p_idx in [expected_player, (expected_player + 1) % 2]:
-                    p = self.game.players[target_p_idx]
-                    cols = p.total_colonists_owned
-                    isl = [True] * min(cols, len(p.island_board)) + [False] * max(0, len(p.island_board) - cols)
-                    self.game.action_mayor_pass(target_p_idx, isl, [0]*len(p.city_board))
+                # Mayor phase requires sequential placement for both players
+                # Player who picked Mayor goes first, then the other
+                mayor_picker = expected_player
+                other_player = (expected_player + 1) % 2
+                
+                # 1. Mayor Picker placement loop
+                p = self.game.players[mayor_picker]
+                self.game._init_mayor_placement(mayor_picker)
+                # Place all owned colonists sequentially
+                # For simplicity in this test, just place 0 everywhere until run out
+                # But wait, we must place if possible.
+                # Let's just place 0 everywhere and rely on "Must Place" logic?
+                # No, engine raises error if we don't place.
+                # Let's just fill island slots 0..N with 1 until run out of colonists
+                
+                # Since this test just checks rotation, we just need to get through the phase.
+                # Loop 24 times for first player
+                for _ in range(24):
+                    # Check capacity of current slot
+                    idx = self.game.mayor_placement_idx
+                    p = self.game.players[mayor_picker]
+                    capacity = 0
+                    if idx < 12: # Island
+                        if idx < len(p.island_board) and p.island_board[idx].tile_type != TileType.EMPTY:
+                            capacity = 1
+                    else: # Building
+                        b_idx = idx - 12
+                        if b_idx < len(p.city_board) and p.city_board[b_idx].building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE):
+                            capacity = BUILDING_DATA[p.city_board[b_idx].building_type][2]
+                            
+                    amount = 1 if (p.unplaced_colonists > 0 and capacity > 0) else 0
+                    self.game.action_mayor_place(mayor_picker, amount)
+                    
+                # 2. Other Player placement loop
+                p = self.game.players[other_player]
+                self.game._init_mayor_placement(other_player)
+                for _ in range(24):
+                    idx = self.game.mayor_placement_idx
+                    p = self.game.players[other_player]
+                    capacity = 0
+                    if idx < 12: # Island
+                        if idx < len(p.island_board) and p.island_board[idx].tile_type != TileType.EMPTY:
+                            capacity = 1
+                    else: # Building
+                        b_idx = idx - 12
+                        if b_idx < len(p.city_board) and p.city_board[b_idx].building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE):
+                            capacity = BUILDING_DATA[p.city_board[b_idx].building_type][2]
+                            
+                    amount = 1 if (p.unplaced_colonists > 0 and capacity > 0) else 0
+                    self.game.action_mayor_place(other_player, amount)
+
             elif role == Role.BUILDER:
                 self.game.action_builder(expected_player, building_choice=None)
                 self.game.action_builder((expected_player + 1) % 2, building_choice=None)

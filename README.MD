@@ -167,6 +167,19 @@ while not done:
 print(info.get("final_scores"))
 ```
 
+## 📊 밸런스 분석 (Balance Analysis)
+
+학습된 모델을 기반으로 게임 밸런스를 분석할 수 있는 도구가 포함되어 있습니다.
+
+```bash
+python evaluate_balance.py --model_path models/ppo_checkpoint_update_50.pth --num_games 1000
+```
+
+### 분석 지표
+- **Seat Bias**: 턴 순서(1~4번)에 따른 승률 편향
+- **Strategy Type**: 승리 시 VP 구성 비율 (Shipping 위주 vs Building 위주)
+- **Building Tier**: 승리자가 가장 많이 구매한 건물 순위
+
 ## 🏛️ 아키텍처
 
 ```
