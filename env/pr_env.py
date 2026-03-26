@@ -12,11 +12,10 @@ SHAPING_GAMMA = 0.99
 class PuertoRicoEnv(AECEnv):
     metadata = {'render.modes': ['human'], 'name': 'puerto_rico_v0'}
 
-    def __init__(self, num_players: int = 4, max_game_steps: int = 2000, potential_type: str = "base"):
+    def __init__(self, num_players: int = 4, max_game_steps: int = 2000):
         super(PuertoRicoEnv, self).__init__()
         self.num_players = num_players
         self.max_game_steps = max_game_steps
-        self.potential_type = potential_type
         self.game = None
         
         self.possible_agents = [f"player_{i}" for i in range(self.num_players)]
@@ -405,104 +404,83 @@ class PuertoRicoEnv(AECEnv):
 
     def _compute_potential(self, player_idx: int) -> float:
         """
-        다양한 잠재 함수 (Potential Function Variations):
-        - none: No potential shaping (0.0).
-        - vp_only: Focus only on victory points.
-        - economic: Focus only on doubloons, production, goods.
-        - base: Balanced between VP, economic, and goods.
+        기본 잠재 함수 (Base Potential Function):
+        - Balanced between VP, economic, and goods.
         """
-        if self.potential_type == "none":
-            return 0.0
-
         p = self.game.players[player_idx]
         phi = 0.0
 
-        # Building VP calculations (needed for base and vp_only)
+        # Building VP calculations
         building_vps = 0.0
         occupied_bonus = 0.0
         num_violet = 0; num_large_prod = 0; num_small_prod = 0
         dynamic_large_vp = 0.0
-        if self.potential_type in ("base", "vp_only"):
-            for b in p.city_board:
-                if b.building_type in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE): continue
-                b_type = b.building_type
-                base_vp = BUILDING_DATA[b_type][1]
-                building_vps += base_vp
-                if b.colonists > 0: occupied_bonus += base_vp
-                if b_type.value in (0, 1): num_small_prod += 1
-                elif b_type.value in (2, 3, 4, 5): num_large_prod += 1
-                elif b_type.value >= 6: num_violet += 1
+        
+        for b in p.city_board:
+            if b.building_type in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE): continue
+            b_type = b.building_type
+            base_vp = BUILDING_DATA[b_type][1]
+            building_vps += base_vp
+            if b.colonists > 0: occupied_bonus += base_vp
+            if b_type.value in (0, 1): num_small_prod += 1
+            elif b_type.value in (2, 3, 4, 5): num_large_prod += 1
+            elif b_type.value >= 6: num_violet += 1
 
-            for b in p.city_board:
-                b_type = b.building_type
-                if b.colonists > 0 and BUILDING_DATA[b_type][4]:
-                    if b_type == BuildingType.CITY_HALL: dynamic_large_vp += num_violet
-                    elif b_type == BuildingType.CUSTOMS_HOUSE: dynamic_large_vp += p.vp_chips // 4
-                    elif b_type == BuildingType.FORTRESS: 
-                        total_colonists = p.unplaced_colonists + sum(1 for tb in p.island_board if tb.is_occupied) + sum(cb.colonists for cb in p.city_board if cb.building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE))
-                        dynamic_large_vp += total_colonists // 3
-                    elif b_type == BuildingType.RESIDENCE:
-                        occ_island = sum(1 for tb in p.island_board if tb.tile_type != TileType.EMPTY)
-                        if occ_island <= 9: dynamic_large_vp += 4
-                        elif occ_island == 10: dynamic_large_vp += 5
-                        elif occ_island == 11: dynamic_large_vp += 6
-                        elif occ_island == 12: dynamic_large_vp += 7
-                    elif b_type == BuildingType.GUILDHALL:
-                        dynamic_large_vp += (num_large_prod * 2) + (num_small_prod * 1)
+        for b in p.city_board:
+            b_type = b.building_type
+            if b.colonists > 0 and BUILDING_DATA[b_type][4]:
+                if b_type == BuildingType.CITY_HALL: dynamic_large_vp += num_violet
+                elif b_type == BuildingType.CUSTOMS_HOUSE: dynamic_large_vp += p.vp_chips // 4
+                elif b_type == BuildingType.FORTRESS: 
+                    total_colonists = p.unplaced_colonists + sum(1 for tb in p.island_board if tb.is_occupied) + sum(cb.colonists for cb in p.city_board if cb.building_type not in (BuildingType.EMPTY, BuildingType.OCCUPIED_SPACE))
+                    dynamic_large_vp += total_colonists // 3
+                elif b_type == BuildingType.RESIDENCE:
+                    occ_island = sum(1 for tb in p.island_board if tb.tile_type != TileType.EMPTY)
+                    if occ_island <= 9: dynamic_large_vp += 4
+                    elif occ_island == 10: dynamic_large_vp += 5
+                    elif occ_island == 11: dynamic_large_vp += 6
+                    elif occ_island == 12: dynamic_large_vp += 7
+                elif b_type == BuildingType.GUILDHALL:
+                    dynamic_large_vp += (num_large_prod * 2) + (num_small_prod * 1)
 
-        # Economic / Production Calculations (needed for base and economic)
+        # Economic / Production Calculations
         effective_production = 0
         total_goods = sum(p.goods.values())
-        if self.potential_type in ("base", "economic"):
-            corn_cap = 0
-            indigo_farm = 0; indigo_fac = 0
-            sugar_farm = 0; sugar_fac = 0
-            tobacco_farm = 0; tobacco_fac = 0
-            coffee_farm = 0; coffee_fac = 0
-            
-            for tb in p.island_board:
-                if tb.is_occupied:
-                    if tb.tile_type == TileType.CORN_PLANTATION: corn_cap += 1
-                    elif tb.tile_type == TileType.INDIGO_PLANTATION: indigo_farm += 1
-                    elif tb.tile_type == TileType.SUGAR_PLANTATION: sugar_farm += 1
-                    elif tb.tile_type == TileType.TOBACCO_PLANTATION: tobacco_farm += 1
-                    elif tb.tile_type == TileType.COFFEE_PLANTATION: coffee_farm += 1
-                    
-            for cb in p.city_board:
-                if cb.colonists > 0:
-                    b_type = cb.building_type
-                    if b_type == BuildingType.SMALL_INDIGO_PLANT: indigo_fac += cb.colonists
-                    elif b_type == BuildingType.INDIGO_PLANT: indigo_fac += cb.colonists
-                    elif b_type == BuildingType.SMALL_SUGAR_MILL: sugar_fac += cb.colonists
-                    elif b_type == BuildingType.SUGAR_MILL: sugar_fac += cb.colonists
-                    elif b_type == BuildingType.TOBACCO_STORAGE: tobacco_fac += cb.colonists
-                    elif b_type == BuildingType.COFFEE_ROASTER: coffee_fac += cb.colonists
-                    
-            effective_production = corn_cap + min(indigo_farm, indigo_fac) + min(sugar_farm, sugar_fac) + min(tobacco_farm, tobacco_fac) + min(coffee_farm, coffee_fac)
+        
+        corn_cap = 0
+        indigo_farm = 0; indigo_fac = 0
+        sugar_farm = 0; sugar_fac = 0
+        tobacco_farm = 0; tobacco_fac = 0
+        coffee_farm = 0; coffee_fac = 0
+        
+        for tb in p.island_board:
+            if tb.is_occupied:
+                if tb.tile_type == TileType.CORN_PLANTATION: corn_cap += 1
+                elif tb.tile_type == TileType.INDIGO_PLANTATION: indigo_farm += 1
+                elif tb.tile_type == TileType.SUGAR_PLANTATION: sugar_farm += 1
+                elif tb.tile_type == TileType.TOBACCO_PLANTATION: tobacco_farm += 1
+                elif tb.tile_type == TileType.COFFEE_PLANTATION: coffee_farm += 1
+                
+        for cb in p.city_board:
+            if cb.colonists > 0:
+                b_type = cb.building_type
+                if b_type == BuildingType.SMALL_INDIGO_PLANT: indigo_fac += cb.colonists
+                elif b_type == BuildingType.INDIGO_PLANT: indigo_fac += cb.colonists
+                elif b_type == BuildingType.SMALL_SUGAR_MILL: sugar_fac += cb.colonists
+                elif b_type == BuildingType.SUGAR_MILL: sugar_fac += cb.colonists
+                elif b_type == BuildingType.TOBACCO_STORAGE: tobacco_fac += cb.colonists
+                elif b_type == BuildingType.COFFEE_ROASTER: coffee_fac += cb.colonists
+                
+        effective_production = corn_cap + min(indigo_farm, indigo_fac) + min(sugar_farm, sugar_fac) + min(tobacco_farm, tobacco_fac) + min(coffee_farm, coffee_fac)
 
-        # Apply weighted totals based on type
-        if self.potential_type == "vp_only":
-            phi += p.vp_chips * 0.05
-            phi += building_vps * 0.08
-            phi += occupied_bonus * 0.02
-            phi += dynamic_large_vp * 0.08
-            
-        elif self.potential_type == "economic":
-            phi += p.doubloons * 0.03
-            phi += effective_production * 0.05
-            phi += total_goods * 0.04
-            
-        elif self.potential_type == "base":
-            phi += p.vp_chips * 0.05
-            phi += building_vps * 0.08
-            phi += occupied_bonus * 0.02
-            phi += dynamic_large_vp * 0.08
-            phi += p.doubloons * 0.03
-            phi += effective_production * 0.02
-            phi += total_goods * 0.001 
-            
-        else:
-            raise ValueError(f"Unknown potential_type: {self.potential_type}")
+        # Apply weighted totals
+        phi += p.vp_chips * 0.05
+        phi += building_vps * 0.08
+        phi += occupied_bonus * 0.02
+        phi += dynamic_large_vp * 0.08
+        phi += p.doubloons * 0.03
+        phi += effective_production * 0.02
+        phi += total_goods * 0.001 
 
         return phi
 

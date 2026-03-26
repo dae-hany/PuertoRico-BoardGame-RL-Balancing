@@ -48,12 +48,12 @@ def sample_opponent_weights(opponent_pool: list, current_weights: dict) -> dict:
         return current_weights
     return random.choice(opponent_pool)
 
-def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool, potential_type="base"):
+def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool):
     """
     지속적으로 살아있으며 메인 프로세스의 명령을 대기하는 워커.
     환경을 유지하여 완전한 학습을 보장합니다.
     """
-    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200, potential_type=potential_type)
+    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200)
     obs_space = env.observation_space(env.possible_agents[0])["observation"]
     
     local_agent = Agent(obs_dim=obs_dim, action_dim=action_dim)
@@ -214,7 +214,7 @@ def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool, 
                     env.step(action.item())
                     agent_name = None
 
-def train(exp_name: str = "", potential_type: str = "base"):
+def train(exp_name: str = ""):
     # 1. 멀티프로세싱 시작 방식 설정 (서버 환경 필수)
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
@@ -225,7 +225,7 @@ def train(exp_name: str = "", potential_type: str = "base"):
     writer = SummaryWriter(f"runs/{run_name}")
 
     # 환경 정보 추출
-    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS, potential_type=potential_type)
+    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS)
     obs_dim = get_flattened_obs_dim(temp_env.observation_space(temp_env.possible_agents[0])["observation"])
     action_dim = temp_env.action_space(temp_env.possible_agents[0]).n
     del temp_env
@@ -254,7 +254,7 @@ def train(exp_name: str = "", potential_type: str = "base"):
     for i in range(NUM_ENVS):
         parent_conn, child_conn = mp.Pipe()
         # 주의: rollout_worker 함수도 위에서 제안한 최적화 버전(CMD 대응형)으로 교체되어 있어야 합니다.
-        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool, potential_type))
+        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool))
         p.start()
         processes.append(p)
         conns.append(parent_conn)
@@ -377,6 +377,5 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="", help="Experiment name for tracking models and logs")
-    parser.add_argument("--potential_type", type=str, default="base", choices=["base", "vp_only", "economic", "none"], help="Type of potential function for shaping")
     args, _ = parser.parse_known_args()
-    train(args.exp_name, args.potential_type)
+    train(args.exp_name)

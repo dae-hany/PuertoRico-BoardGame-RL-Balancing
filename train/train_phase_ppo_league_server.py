@@ -53,12 +53,12 @@ CMD_CLOSE = 2
 def extract_phase_id(obs_dict) -> int:
     return int(obs_dict["global_state"]["current_phase"])
 
-def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool, potential_type="base"):
+def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool):
     """
     Persistent environment worker for PhasePPO.
     Receives commands from main process, pushes transitions to shared memory.
     """
-    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200, potential_type=potential_type)
+    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200)
     obs_space = env.observation_space(env.possible_agents[0])["observation"]
     
     local_agent = PhasePPOAgent(obs_dim=obs_dim, action_dim=action_dim)
@@ -251,7 +251,7 @@ def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool, 
                     env.step(action.item())
                     agent_name = None
 
-def train(exp_name: str = "", potential_type: str = "base"):
+def train(exp_name: str = ""):
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
     
@@ -261,7 +261,7 @@ def train(exp_name: str = "", potential_type: str = "base"):
     writer = SummaryWriter(f"runs/{run_name}")
 
     # Env Info Extraction
-    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS, potential_type=potential_type)
+    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS)
     obs_dim = get_flattened_obs_dim(temp_env.observation_space(temp_env.possible_agents[0])["observation"])
     action_dim = temp_env.action_space(temp_env.possible_agents[0]).n
     del temp_env
@@ -295,7 +295,7 @@ def train(exp_name: str = "", potential_type: str = "base"):
     conns = []
     for i in range(NUM_ENVS):
         parent_conn, child_conn = mp.Pipe()
-        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool, potential_type))
+        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool))
         p.start()
         processes.append(p)
         conns.append(parent_conn)
@@ -460,6 +460,5 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="", help="Experiment name for tracking models and logs")
-    parser.add_argument("--potential_type", type=str, default="base", choices=["base", "vp_only", "economic", "none"], help="Type of potential function for shaping")
     args, _ = parser.parse_known_args()
-    train(args.exp_name, args.potential_type)
+    train(args.exp_name)
