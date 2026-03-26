@@ -473,13 +473,23 @@ class PuertoRicoEnv(AECEnv):
                 
         effective_production = corn_cap + min(indigo_farm, indigo_fac) + min(sugar_farm, sugar_fac) + min(tobacco_farm, tobacco_fac) + min(coffee_farm, coffee_fac)
 
-        # Apply weighted totals
+        """
+        base 계수의 합 : 0.05 + 0.08 + 0.02 + 0.08 + 0.03 + 0.02 = 0.28
+        파라미터 튜닝을 할 때에도 모든 계수의 합이 0.28을 넘어가지 않도록 scale에 주의할 것
+        """
+        # 선적 메타를 결정하는 상수
         phi += p.vp_chips * 0.05
+        phi += effective_production * 0.02
+
+        # 건물 빌드 메타를 결정하는 상수
         phi += building_vps * 0.08
         phi += occupied_bonus * 0.02
         phi += dynamic_large_vp * 0.08
+
+        # 더블룬 메타를 결정하는 상수
         phi += p.doubloons * 0.03
-        phi += effective_production * 0.02
+
+        # 고정
         phi += total_goods * 0.001 
 
         return phi

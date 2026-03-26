@@ -48,12 +48,14 @@ def sample_opponent_weights(opponent_pool: list, current_weights: dict) -> dict:
         return current_weights
     return random.choice(opponent_pool)
 
-def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool):
+def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool,
+                   w_ship=1.0, w_bldg=1.0, w_doub=1.0):
     """
     지속적으로 살아있으며 메인 프로세스의 명령을 대기하는 워커.
     환경을 유지하여 완전한 학습을 보장합니다.
     """
-    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200)
+    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200,
+                        w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub)
     obs_space = env.observation_space(env.possible_agents[0])["observation"]
     
     local_agent = Agent(obs_dim=obs_dim, action_dim=action_dim)
@@ -210,18 +212,19 @@ def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool):
                     env.step(action.item())
                     agent_name = None
 
-def train(exp_name: str = ""):
+def train(exp_name: str = "", w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0):
     # 1. 멀티프로세싱 시작 방식 설정 (서버 환경 필수)
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     base_name = "PPO_PR_Server"
-    run_name = f"{base_name}_{exp_name}_{int(time.time())}" if exp_name else f"{base_name}_{int(time.time())}"
+    meta_tag = f"S{w_ship}_B{w_bldg}_D{w_doub}"
+    run_name = f"{base_name}_{exp_name}_{meta_tag}_{int(time.time())}" if exp_name else f"{base_name}_{meta_tag}_{int(time.time())}"
     writer = SummaryWriter(f"runs/{run_name}")
 
     # 환경 정보 추출
-    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS)
+    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS, w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub)
     obs_dim = get_flattened_obs_dim(temp_env.observation_space(temp_env.possible_agents[0])["observation"])
     action_dim = temp_env.action_space(temp_env.possible_agents[0]).n
     del temp_env
@@ -250,7 +253,7 @@ def train(exp_name: str = ""):
     for i in range(NUM_ENVS):
         parent_conn, child_conn = mp.Pipe()
         # 주의: rollout_worker 함수도 위에서 제안한 최적화 버전(CMD 대응형)으로 교체되어 있어야 합니다.
-        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool))
+        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool, w_ship, w_bldg, w_doub))
         p.start()
         processes.append(p)
         conns.append(parent_conn)
@@ -335,6 +338,10 @@ def train(exp_name: str = ""):
                 writer.add_scalar("Strategy/VP_Shipping", sum(r["stats"]["vp_chips"] for r in results) / total_games, global_step)
                 writer.add_scalar("Strategy/VP_Building", sum(r["stats"]["building_vp"] for r in results) / total_games, global_step)
                 
+                writer.add_scalar("Shaping_Weights/Shipping", w_ship, global_step)
+                writer.add_scalar("Shaping_Weights/Building", w_bldg, global_step)
+                writer.add_scalar("Shaping_Weights/Doubloons", w_doub, global_step)
+                
                 writer.add_scalar("End_Reason/Shipping_Limit", sum(r["stats"]["end_reason_shipping"] for r in results) / total_games, global_step)
                 writer.add_scalar("End_Reason/Building_Full", sum(r["stats"]["end_reason_building"] for r in results) / total_games, global_step)
                 writer.add_scalar("End_Reason/Colonist_Empty", sum(r["stats"]["end_reason_colonists"] for r in results) / total_games, global_step)
@@ -372,5 +379,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="", help="Experiment name for tracking models and logs")
+    parser.add_argument("--w_ship", type=float, default=1.0, help="Weight multiplier for shipping meta")
+    parser.add_argument("--w_bldg", type=float, default=1.0, help="Weight multiplier for building meta")
+    parser.add_argument("--w_doub", type=float, default=1.0, help="Weight multiplier for doubloon meta")
     args, _ = parser.parse_known_args()
-    train(args.exp_name)
+    train(args.exp_name, args.w_ship, args.w_bldg, args.w_doub)

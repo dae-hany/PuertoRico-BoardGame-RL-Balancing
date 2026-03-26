@@ -53,12 +53,14 @@ CMD_CLOSE = 2
 def extract_phase_id(obs_dict) -> int:
     return int(obs_dict["global_state"]["current_phase"])
 
-def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool):
+def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool, 
+                   w_ship=1.0, w_bldg=1.0, w_doub=1.0):
     """
     Persistent environment worker for PhasePPO.
     Receives commands from main process, pushes transitions to shared memory.
     """
-    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200)
+    env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200,
+                        w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub)
     obs_space = env.observation_space(env.possible_agents[0])["observation"]
     
     local_agent = PhasePPOAgent(obs_dim=obs_dim, action_dim=action_dim)
@@ -251,17 +253,18 @@ def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool):
                     env.step(action.item())
                     agent_name = None
 
-def train(exp_name: str = ""):
+def train(exp_name: str = "", w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0):
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     base_name = "PhasePPO_PR_Server"
-    run_name = f"{base_name}_{exp_name}_{int(time.time())}" if exp_name else f"{base_name}_{int(time.time())}"
+    meta_tag = f"S{w_ship}_B{w_bldg}_D{w_doub}"
+    run_name = f"{base_name}_{exp_name}_{meta_tag}_{int(time.time())}" if exp_name else f"{base_name}_{meta_tag}_{int(time.time())}"
     writer = SummaryWriter(f"runs/{run_name}")
 
     # Env Info Extraction
-    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS)
+    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS, w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub)
     obs_dim = get_flattened_obs_dim(temp_env.observation_space(temp_env.possible_agents[0])["observation"])
     action_dim = temp_env.action_space(temp_env.possible_agents[0]).n
     del temp_env
@@ -295,7 +298,7 @@ def train(exp_name: str = ""):
     conns = []
     for i in range(NUM_ENVS):
         parent_conn, child_conn = mp.Pipe()
-        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool))
+        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool, w_ship, w_bldg, w_doub))
         p.start()
         processes.append(p)
         conns.append(parent_conn)
@@ -424,6 +427,10 @@ def train(exp_name: str = ""):
                 writer.add_scalar("Strategy/VP_Shipping", sum(r["stats"]["vp_chips"] for r in results) / total_games, global_step)
                 writer.add_scalar("Strategy/VP_Building", sum(r["stats"]["building_vp"] for r in results) / total_games, global_step)
                 
+                writer.add_scalar("Shaping_Weights/Shipping", w_ship, global_step)
+                writer.add_scalar("Shaping_Weights/Building", w_bldg, global_step)
+                writer.add_scalar("Shaping_Weights/Doubloons", w_doub, global_step)
+                
                 writer.add_scalar("End_Reason/Shipping_Limit", sum(r["stats"]["end_reason_shipping"] for r in results) / total_games, global_step)
                 writer.add_scalar("End_Reason/Building_Full", sum(r["stats"]["end_reason_building"] for r in results) / total_games, global_step)
                 writer.add_scalar("End_Reason/Colonist_Empty", sum(r["stats"]["end_reason_colonists"] for r in results) / total_games, global_step)
@@ -460,5 +467,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp_name", type=str, default="", help="Experiment name for tracking models and logs")
+    parser.add_argument("--w_ship", type=float, default=1.0, help="Weight multiplier for shipping meta")
+    parser.add_argument("--w_bldg", type=float, default=1.0, help="Weight multiplier for building meta")
+    parser.add_argument("--w_doub", type=float, default=1.0, help="Weight multiplier for doubloon meta")
     args, _ = parser.parse_known_args()
-    train(args.exp_name)
+    train(args.exp_name, args.w_ship, args.w_bldg, args.w_doub)
