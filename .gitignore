@@ -1,8 +1,6 @@
 ### --- Python / RL Project Standard --- ###
 # 가상환경 (가장 큰 주범)
 venv/
-env/
-.env/
 bin/
 lib/
 share/
