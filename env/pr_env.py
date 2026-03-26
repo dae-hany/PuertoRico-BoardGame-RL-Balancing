@@ -12,10 +12,14 @@ SHAPING_GAMMA = 0.99
 class PuertoRicoEnv(AECEnv):
     metadata = {'render.modes': ['human'], 'name': 'puerto_rico_v0'}
 
-    def __init__(self, num_players: int = 4, max_game_steps: int = 2000):
+    def __init__(self, num_players: int = 4, max_game_steps: int = 2000,
+                 w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0):
         super(PuertoRicoEnv, self).__init__()
         self.num_players = num_players
         self.max_game_steps = max_game_steps
+        self.w_ship = w_ship
+        self.w_bldg = w_bldg
+        self.w_doub = w_doub
         self.game = None
         
         self.possible_agents = [f"player_{i}" for i in range(self.num_players)]
@@ -478,16 +482,13 @@ class PuertoRicoEnv(AECEnv):
         파라미터 튜닝을 할 때에도 모든 계수의 합이 0.28을 넘어가지 않도록 scale에 주의할 것
         """
         # 선적 메타를 결정하는 상수
-        phi += p.vp_chips * 0.05
-        phi += effective_production * 0.02
+        phi += (p.vp_chips * 0.05 + effective_production * 0.02) * self.w_ship
 
         # 건물 빌드 메타를 결정하는 상수
-        phi += building_vps * 0.08
-        phi += occupied_bonus * 0.02
-        phi += dynamic_large_vp * 0.08
+        phi += (building_vps * 0.08 + occupied_bonus * 0.02 + dynamic_large_vp * 0.08) * self.w_bldg
 
         # 더블룬 메타를 결정하는 상수
-        phi += p.doubloons * 0.03
+        phi += (p.doubloons * 0.03) * self.w_doub
 
         # 고정
         phi += total_goods * 0.001 
