@@ -1,0 +1,2 @@
+agent a가 잠재 함수 없는 ppo
+agent b가 잠재 함수 있는 ppo(decay도 없음)
