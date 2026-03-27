@@ -13,13 +13,15 @@ class PuertoRicoEnv(AECEnv):
     metadata = {'render.modes': ['human'], 'name': 'puerto_rico_v0'}
 
     def __init__(self, num_players: int = 4, max_game_steps: int = 2000,
-                 w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0):
+                 w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0,
+                 potential_mode: str = "option3"):
         super(PuertoRicoEnv, self).__init__()
         self.num_players = num_players
         self.max_game_steps = max_game_steps
         self.w_ship = w_ship
         self.w_bldg = w_bldg
         self.w_doub = w_doub
+        self.potential_mode = potential_mode
         self.game = None
         
         self.possible_agents = [f"player_{i}" for i in range(self.num_players)]
@@ -408,8 +410,10 @@ class PuertoRicoEnv(AECEnv):
 
     def _compute_potential(self, player_idx: int) -> float:
         """
-        기본 잠재 함수 (Base Potential Function):
-        - Balanced between VP, economic, and goods.
+        잠재 함수:
+        Option 1 : effective_production을 독립 상수로 분리 → meta weight에 영향받지 않는 neutral baseline
+        Option 2 : 생산력을 w_ship과 w_doub에 균등 분배 → 양쪽 meta에 동시 기여
+        Option 3 : quantity/value 분할 → 가장 정교한 모델링
         """
         p = self.game.players[player_idx]
         phi = 0.0
@@ -448,7 +452,6 @@ class PuertoRicoEnv(AECEnv):
                     dynamic_large_vp += (num_large_prod * 2) + (num_small_prod * 1)
 
         # Economic / Production Calculations
-        effective_production = 0
         total_goods = sum(p.goods.values())
         
         corn_cap = 0
@@ -475,23 +478,49 @@ class PuertoRicoEnv(AECEnv):
                 elif b_type == BuildingType.TOBACCO_STORAGE: tobacco_fac += cb.colonists
                 elif b_type == BuildingType.COFFEE_ROASTER: coffee_fac += cb.colonists
                 
-        effective_production = corn_cap + min(indigo_farm, indigo_fac) + min(sugar_farm, sugar_fac) + min(tobacco_farm, tobacco_fac) + min(coffee_farm, coffee_fac)
+        # Production breakdowns
+        prod_corn = corn_cap
+        prod_indigo = min(indigo_farm, indigo_fac)
+        prod_sugar = min(sugar_farm, sugar_fac)
+        prod_tobacco = min(tobacco_farm, tobacco_fac)
+        prod_coffee = min(coffee_farm, coffee_fac)
 
         """
         base 계수의 합 : 0.05 + 0.08 + 0.02 + 0.08 + 0.03 + 0.02 = 0.28
         파라미터 튜닝을 할 때에도 모든 계수의 합이 0.28을 넘어가지 않도록 scale에 주의할 것
         """
-        # 선적 메타를 결정하는 상수
-        phi += (p.vp_chips * 0.05 + effective_production * 0.02) * self.w_ship
+        if getattr(self, 'potential_mode', 'option3') == "option1":
+            # Option 1: 생산력을 공통 기반(Base) 상수로 분리
+            effective_production = prod_corn + prod_indigo + prod_sugar + prod_tobacco + prod_coffee
+            
+            phi += (p.vp_chips * 0.05) * self.w_ship
+            phi += (building_vps * 0.08 + occupied_bonus * 0.02 + dynamic_large_vp * 0.08) * self.w_bldg
+            phi += (p.doubloons * 0.03) * self.w_doub
+            phi += (effective_production * 0.02)
+            phi += (total_goods * 0.001)
 
-        # 건물 빌드 메타를 결정하는 상수
-        phi += (building_vps * 0.08 + occupied_bonus * 0.02 + dynamic_large_vp * 0.08) * self.w_bldg
+        elif getattr(self, 'potential_mode', 'option3') == "option2":
+            # Option 2: 생산력을 w_ship과 w_doub에 반씩(0.01) 비례 할당
+            effective_production = prod_corn + prod_indigo + prod_sugar + prod_tobacco + prod_coffee
+            
+            phi += (p.vp_chips * 0.05 + effective_production * 0.01) * self.w_ship
+            phi += (building_vps * 0.08 + occupied_bonus * 0.02 + dynamic_large_vp * 0.08) * self.w_bldg
+            phi += (p.doubloons * 0.03 + effective_production * 0.01) * self.w_doub
+            phi += (total_goods * 0.001)
 
-        # 더블룬 메타를 결정하는 상수
-        phi += (p.doubloons * 0.03) * self.w_doub
-
-        # 고정
-        phi += total_goods * 0.001 
+        else:
+            # Option 3 (기본값): 수량(Quantity)과 경제가치(Value) 분할
+            quantity_production = prod_corn + prod_indigo + prod_sugar + prod_tobacco + prod_coffee
+            value_production = 0 * prod_corn + 1 * prod_indigo + 2 * prod_sugar + 3 * prod_tobacco + 4 * prod_coffee
+            
+            # 수량(Quantity)은 선적 대상 -> 선적 메타
+            phi += (p.vp_chips * 0.05 + quantity_production * 0.01) * self.w_ship
+            # 가치(Value)는 판매/빌딩 대상 -> 더블룬/건물 메타
+            phi += (p.doubloons * 0.03 + value_production * 0.005) * self.w_doub
+            # 건물 점수 (기존과 동일)
+            phi += (building_vps * 0.08 + occupied_bonus * 0.02 + dynamic_large_vp * 0.08) * self.w_bldg
+            # 고정 
+            phi += (total_goods * 0.001)
 
         return phi
 

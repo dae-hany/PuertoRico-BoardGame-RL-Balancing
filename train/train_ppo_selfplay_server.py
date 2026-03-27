@@ -49,13 +49,13 @@ def sample_opponent_weights(opponent_pool: list, current_weights: dict) -> dict:
     return random.choice(opponent_pool)
 
 def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool,
-                   w_ship=1.0, w_bldg=1.0, w_doub=1.0):
+                   w_ship=1.0, w_bldg=1.0, w_doub=1.0, potential_mode="option3"):
     """
     지속적으로 살아있으며 메인 프로세스의 명령을 대기하는 워커.
     환경을 유지하여 완전한 학습을 보장합니다.
     """
     env = PuertoRicoEnv(num_players=NUM_PLAYERS, max_game_steps=1200,
-                        w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub)
+                        w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub, potential_mode=potential_mode)
     obs_space = env.observation_space(env.possible_agents[0])["observation"]
     
     local_agent = Agent(obs_dim=obs_dim, action_dim=action_dim)
@@ -212,19 +212,19 @@ def rollout_worker(rank, conn, shared_bufs, obs_dim, action_dim, opponent_pool,
                     env.step(action.item())
                     agent_name = None
 
-def train(exp_name: str = "", w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0):
+def train(exp_name: str = "", w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: float = 1.0, potential_mode: str = "option3"):
     # 1. 멀티프로세싱 시작 방식 설정 (서버 환경 필수)
     try: mp.set_start_method('spawn', force=True)
     except RuntimeError: pass
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     base_name = "PPO_PR_Server"
-    meta_tag = f"S{w_ship}_B{w_bldg}_D{w_doub}"
+    meta_tag = f"{potential_mode}_S{w_ship}_B{w_bldg}_D{w_doub}"
     run_name = f"{base_name}_{exp_name}_{meta_tag}_{int(time.time())}" if exp_name else f"{base_name}_{meta_tag}_{int(time.time())}"
     writer = SummaryWriter(f"runs/{run_name}")
 
     # 환경 정보 추출
-    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS, w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub)
+    temp_env = PuertoRicoEnv(num_players=NUM_PLAYERS, w_ship=w_ship, w_bldg=w_bldg, w_doub=w_doub, potential_mode=potential_mode)
     obs_dim = get_flattened_obs_dim(temp_env.observation_space(temp_env.possible_agents[0])["observation"])
     action_dim = temp_env.action_space(temp_env.possible_agents[0]).n
     del temp_env
@@ -253,7 +253,7 @@ def train(exp_name: str = "", w_ship: float = 1.0, w_bldg: float = 1.0, w_doub: 
     for i in range(NUM_ENVS):
         parent_conn, child_conn = mp.Pipe()
         # 주의: rollout_worker 함수도 위에서 제안한 최적화 버전(CMD 대응형)으로 교체되어 있어야 합니다.
-        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool, w_ship, w_bldg, w_doub))
+        p = mp.Process(target=rollout_worker, args=(i, child_conn, shared_bufs, obs_dim, action_dim, opponent_pool, w_ship, w_bldg, w_doub, potential_mode))
         p.start()
         processes.append(p)
         conns.append(parent_conn)
@@ -382,5 +382,6 @@ if __name__ == "__main__":
     parser.add_argument("--w_ship", type=float, default=1.0, help="Weight multiplier for shipping meta")
     parser.add_argument("--w_bldg", type=float, default=1.0, help="Weight multiplier for building meta")
     parser.add_argument("--w_doub", type=float, default=1.0, help="Weight multiplier for doubloon meta")
+    parser.add_argument("--potential_mode", type=str, default="option3", choices=["option1", "option2", "option3"], help="Potential function mode to use")
     args, _ = parser.parse_known_args()
-    train(args.exp_name, args.w_ship, args.w_bldg, args.w_doub)
+    train(args.exp_name, args.w_ship, args.w_bldg, args.w_doub, args.potential_mode)
