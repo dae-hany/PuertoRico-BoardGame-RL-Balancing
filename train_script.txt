@@ -1,0 +1,14 @@
+# option 3 : 상품의 quantity와 value를 분할해 학습
+python train/train_ppo_selfplay_server.py \
+    --exp_name "Option3_QV_Split" \
+    --potential_mode option3
+
+# option 2 : 생산력을 w_ship과 w_doub에 균등 분배 → 양쪽 meta에 동시 기여
+python train/train_ppo_selfplay_server.py \
+    --exp_name "Option2_Production_Split" \
+    --potential_mode option2
+
+# option 1 : effective_production을 독립 상수로 분리 → meta weight에 영향받지 않는 neutral baseline
+python train/train_ppo_selfplay_server.py \
+    --exp_name "Option1_Production_Independent" \
+    --potential_mode option1
