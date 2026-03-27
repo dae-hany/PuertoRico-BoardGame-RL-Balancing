@@ -520,7 +520,7 @@ class PuertoRicoEnv(AECEnv):
             # 건물 점수 (기존과 동일)
             phi += (building_vps * 0.08 + occupied_bonus * 0.02 + dynamic_large_vp * 0.08) * self.w_bldg
             # 고정 
-            phi += (total_goods * 0.001)
+            phi += (total_goods * 0.006)
 
         return phi
 
