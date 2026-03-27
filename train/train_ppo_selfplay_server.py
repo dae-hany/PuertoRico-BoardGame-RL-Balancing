@@ -20,7 +20,7 @@ from configs.constants import Role, BuildingType
 
 # --- 서버 최적화 하이퍼파라미터 ---
 NUM_PLAYERS = 3
-NUM_ENVS = 32
+NUM_ENVS = 96
 STEPS_PER_ENV = 512 
 BATCH_SIZE = NUM_ENVS * STEPS_PER_ENV 
 MINIBATCH_SIZE = 512 
